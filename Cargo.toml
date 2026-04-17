@@ -1,0 +1,16 @@
+[workspace]
+members = [
+    "rouman-daemon",
+    "rouman-cli",
+    "rouman-api",
+    "rouman-common",
+    "rouman-ebpf",
+]
+resolver = "2"
+
+[profile.release]
+lto = true
+panic = "abort"
+
+[profile.dev]
+panic = "abort"

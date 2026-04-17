@@ -1,0 +1,21 @@
+[package]
+name = "rouman-common"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+network-types = "0.1.0"
+aya-log-common = "0.1.15"
+
+[features]
+default = []
+user = ["aya", "serde"]
+
+[dependencies.serde]
+version = "1.0"
+features = ["derive"]
+optional = true
+
+[dependencies.aya]
+version = "0.13.0"
+optional = true

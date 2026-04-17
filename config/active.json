@@ -1,0 +1,28 @@
+{
+  "system": {
+    "hostname": "rouman-core",
+    "description": "Rouman OS Next-Gen Router"
+  },
+  "network": {
+    "wan_interface": "eth0",
+    "enable_nat": false,
+    "port_forwards": [],
+    "qos": {
+      "download_mbps": 0,
+      "upload_mbps": 0
+    },
+    "dhcp": {
+      "enabled": false,
+      "interface": "eth1",
+      "range_start": "192.168.1.100",
+      "range_end": "192.168.1.200",
+      "gateway": "192.168.1.1",
+      "dns_servers": [
+        "1.1.1.1",
+        "8.8.8.8"
+      ],
+      "lease_time_secs": 86400,
+      "static_leases": []
+    }
+  }
+}

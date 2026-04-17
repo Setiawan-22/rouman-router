@@ -1,0 +1,36 @@
+# STAGE 1: Build Svelte UI (Frontend)
+FROM node:18-alpine AS builder-frontend
+WORKDIR /app/ui
+# COPY ui/package.json ui/pnpm-lock.yaml ./
+# RUN npm install -g pnpm && pnpm install
+# COPY ui/ ./
+# RUN pnpm run build
+
+# STAGE 2: Build Rust Backend (Control Plane & API)
+FROM rust:alpine AS builder-backend
+RUN apk add --no-cache musl-dev gcc make
+WORKDIR /app
+# We will copy the Cargo project and build it.
+# COPY Cargo.toml Cargo.lock ./
+# COPY rouman-daemon ./rouman-daemon
+# COPY rouman-cli ./rouman-cli
+# COPY rouman-api ./rouman-api
+# RUN cargo build --release
+
+# STAGE 3: Final Alpine Image
+FROM alpine:latest
+RUN apk add --no-cache bash ca-certificates iproute2 iptables wireguard-tools
+WORKDIR /opt/rouman
+
+# Copy API and Daemon binaries
+# COPY --from=builder-backend /app/target/release/rouman-daemon /usr/local/bin/
+# COPY --from=builder-backend /app/target/release/rouman-api /usr/local/bin/
+# COPY --from=builder-backend /app/target/release/rouman-cli /usr/local/bin/
+
+# Copy the frontend build to where axum expects it
+# COPY --from=builder-frontend /app/ui/build /opt/rouman/ui/build
+
+EXPOSE 80 443
+
+# Command to run the daemon and API
+CMD ["/bin/bash"]

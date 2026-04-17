@@ -1,0 +1,16 @@
+@import "tailwindcss";
+
+@theme {
+    --color-neon-green: #00FFC4;
+    --color-neon-green-glow: rgba(0, 255, 196, 0.4);
+    --color-dark-glass: rgba(10, 15, 10, 0.7);
+}
+
+body {
+    background-color: #030a05;
+    background-image: 
+        radial-gradient(circle at 50% -50%, var(--color-neon-green-glow) 0%, transparent 60%),
+        linear-gradient(to bottom, transparent 90%, rgba(0, 255, 196, 0.05) 100%);
+    color: #e0f8e5;
+    min-height: 100vh;
+}

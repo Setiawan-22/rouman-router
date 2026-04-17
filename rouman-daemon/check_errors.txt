@@ -1,0 +1,304 @@
+warning: unused import: `crate::database::Database`
+ --> rouman-api/src/network/radius.rs:4:5
+  |
+4 | use crate::database::Database;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `std::sync::Arc`
+ --> rouman-api/src/network/radius.rs:6:5
+  |
+6 | use std::sync::Arc;
+  |     ^^^^^^^^^^^^^^
+
+warning: unused import: `FromRef`
+ --> rouman-api/src/dns/mod.rs:1:28
+  |
+1 | use axum::extract::{State, FromRef};
+  |                            ^^^^^^^
+
+warning: unused import: `std::sync::Arc`
+ --> rouman-api/src/dns/mod.rs:3:5
+  |
+3 | use std::sync::Arc;
+  |     ^^^^^^^^^^^^^^
+
+warning: unused import: `std::sync::Arc`
+ --> rouman-api/src/database.rs:2:5
+  |
+2 | use std::sync::Arc;
+  |     ^^^^^^^^^^^^^^
+
+warning: `rouman-api` (lib) generated 5 warnings (run `cargo fix --lib -p rouman-api` to apply 5 suggestions)
+    Checking rouman-daemon v0.1.0 (/opt/rouman/rouman-daemon)
+error[E0432]: unresolved import `radius::dictionary`
+ --> rouman-daemon/src/radius_server.rs:2:13
+  |
+2 | use radius::dictionary::Dictionary;
+  |             ^^^^^^^^^^ could not find `dictionary` in `radius`
+
+error[E0432]: unresolved import `radius::packet`
+ --> rouman-daemon/src/radius_server.rs:3:13
+  |
+3 | use radius::packet::{RadiusAttribute, Type};
+  |             ^^^^^^ could not find `packet` in `radius`
+
+error[E0425]: cannot find function `serve_async` in crate `radius`
+  --> rouman-daemon/src/radius_server.rs:13:21
+   |
+13 | ...dius::serve_async(addr, dict, secret, move |p...
+   |          ^^^^^^^^^^^ not found in `radius`
+
+error[E0425]: cannot find function `run_radius_server` in module `radius_server`
+   --> rouman-daemon/src/main.rs:105:24
+    |
+105 | ...   radius_server::run_radius_server(db_radiu...
+    |                      ^^^^^^^^^^^^^^^^^
+    |
+   ::: rouman-daemon/src/radius_server.rs:6:1
+    |
+  6 | pub async fn start_radius_server(db: Arc<Database>) {
+    | --------------------------------------------------- similarly named function `start_radius_server` defined here
+    |
+help: a function with a similar name exists
+    |
+105 -         radius_server::run_radius_server(db_radius, "rouman-secret".to_string()).await;
+105 +         radius_server::start_radius_server(db_radius, "rouman-secret".to_string()).await;
+    |
+
+warning: unused import: `post`
+  --> rouman-daemon/src/dns_server.rs:15:20
+   |
+15 |     routing::{get, post},
+   |                    ^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `NetworkInterface`
+ --> rouman-daemon/src/neighbor_discovery.rs:1:47
+  |
+1 | ...nel::Ethernet, NetworkInterface};
+  |                   ^^^^^^^^^^^^^^^^
+
+warning: unused imports: `Deserialize` and `Serialize`
+ --> rouman-daemon/src/neighbor_discovery.rs:5:13
+  |
+5 | use serde::{Deserialize, Serialize};
+  |             ^^^^^^^^^^^  ^^^^^^^^^
+
+warning: unused import: `tokio::sync::Mutex`
+ --> rouman-daemon/src/neighbor_discovery.rs:9:5
+  |
+9 | use tokio::sync::Mutex;
+  |     ^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::collections::HashMap`
+  --> rouman-daemon/src/neighbor_discovery.rs:10:5
+   |
+10 | use std::collections::HashMap;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::process::Stdio`
+ --> rouman-daemon/src/pppoe_manager.rs:2:5
+  |
+2 | use std::process::Stdio;
+  |     ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `PppoeState`
+ --> rouman-daemon/src/pppoe_manager.rs:8:47
+  |
+8 | ...oe::{PppoeStatus, PppoeState};
+  |                      ^^^^^^^^^^
+
+warning: unused imports: `AST` and `EvalAltResult`
+ --> rouman-daemon/src/automation_manager.rs:1:20
+  |
+1 | use rhai::{Engine, EvalAltResult, Scope, AST};
+  |                    ^^^^^^^^^^^^^         ^^^
+
+warning: unused import: `std::sync::Arc`
+ --> rouman-daemon/src/database.rs:2:5
+  |
+2 | use std::sync::Arc;
+  |     ^^^^^^^^^^^^^^
+
+warning: unused import: `Json`
+ --> rouman-daemon/src/hotspot_server.rs:3:13
+  |
+3 |     Router, Json, extract::State,
+  |             ^^^^
+
+warning: unused import: `Serialize`
+ --> rouman-daemon/src/hotspot_server.rs:8:26
+  |
+8 | use serde::{Deserialize, Serialize};
+  |                          ^^^^^^^^^
+
+warning: unused import: `std::process::Command`
+ --> rouman-daemon/src/hotspot_server.rs:9:5
+  |
+9 | use std::process::Command;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `Empty` and `Full`
+ --> rouman-daemon/src/proxy/mod.rs:8:31
+  |
+8 | use http_body_util::{BodyExt, Full, Empty};
+  |                               ^^^^  ^^^^^
+
+warning: unused import: `bytes::Bytes`
+ --> rouman-daemon/src/proxy/mod.rs:9:5
+  |
+9 | use bytes::Bytes;
+  |     ^^^^^^^^^^^^
+
+warning: unused import: `tokio_rustls::TlsAcceptor`
+  --> rouman-daemon/src/proxy/mod.rs:11:5
+   |
+11 | use tokio_rustls::TlsAcceptor;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0277]: `ProxyCertResolver` doesn't implement `std::fmt::Debug`
+   --> rouman-daemon/src/proxy/mod.rs:20:29
+    |
+ 20 | impl ResolvesServerCert for ProxyCertResolver {
+    |                             ^^^^^^^^^^^^^^^^^ unsatisfied trait bound
+    |
+help: the trait `std::fmt::Debug` is not implemented for `ProxyCertResolver`
+   --> rouman-daemon/src/proxy/mod.rs:16:1
+    |
+ 16 | pub struct ProxyCertResolver {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    = note: add `#[derive(Debug)]` to `ProxyCertResolver` or manually `impl std::fmt::Debug for ProxyCertResolver`
+note: required by a bound in `ResolvesServerCert`
+   --> /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/rustls-0.23.38/src/server/server_conn.rs:124:31
+    |
+124 | ...vesServerCert: Debug + Send + Sync {
+    |                   ^^^^^ required by this bound in `ResolvesServerCert`
+
+error[E0282]: type annotations needed
+  --> rouman-daemon/src/radius_server.rs:13:59
+   |
+13 | ...e_async(addr, dict, secret, move |packet| {
+   |                                      ^^^^^^
+...
+16 | ... = packet.username().unwrap_or("").to_string();
+   |       ------ type must be known at this point
+   |
+help: consider giving this closure parameter an explicit type
+   |
+13 |     let _ = radius::serve_async(addr, dict, secret, move |packet: /* Type */| {
+   |                                                                 ++++++++++++
+
+error[E0277]: the trait bound `bytes::Bytes: HttpBody` is not satisfied
+   --> rouman-daemon/src/proxy/mod.rs:58:73
+    |
+ 58 | ...  .serve_connection(hyper_util::rt::TokioIo::new(stream), service)
+    |       ----------------                                       ^^^^^^^ unsatisfied trait bound
+    |       |
+    |       required by a bound introduced by this call
+    |
+    = help: the trait `HttpBody` is not implemented for `bytes::Bytes`
+    = help: the following other types implement trait `HttpBody`:
+              &mut T
+              BodyStream<B>
+              Box<T>
+              BoxBody<D, E>
+              Collected<B>
+              Limited<B>
+              MapErr<B, F>
+              MapFrame<B, F>
+            and 20 others
+    = note: required for `ServiceFn<..., ...>` to implement `Service<Request<Incoming>>`
+note: required by a bound in `hyper_util::server::conn::auto::Builder::<E>::serve_connection`
+   --> /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/hyper-util-0.1.20/src/server/conn/auto/mod.rs:215:12
+    |
+213 | ...fn serve_connection<I, S, B>(&self, io: I, service: S) -...
+    |       ---------------- required by a bound in this associated function
+214 | ...e
+215 | ...S: Service<Request<Incoming>, Response = Response<B>>,
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Builder::<E>::serve_connection`
+    = note: the full name for the type has been written to '/opt/rouman/target/debug/deps/rouman_daemon-301f0398f8a8ad41.long-type-15040550721037247630.txt'
+    = note: consider using `--verbose` to print the full type name to the console
+
+error[E0277]: the trait bound `bytes::Bytes: HttpBody` is not satisfied
+    --> rouman-daemon/src/proxy/mod.rs:57:31
+     |
+  57 |   ... = Builder::new(TokioExecutor::new())
+     |  _______^
+  58 | | ...ection(hyper_util::rt::TokioIo::new(stream), service)
+     | |________________________________________________________^ unsatisfied trait bound
+     |
+     = help: the trait `HttpBody` is not implemented for `bytes::Bytes`
+     = help: the following other types implement trait `HttpBody`:
+               &mut T
+               BodyStream<B>
+               Box<T>
+               BoxBody<D, E>
+               Collected<B>
+               Limited<B>
+               MapErr<B, F>
+               MapFrame<B, F>
+             and 20 others
+     = note: required for `ServiceFn<..., ...>` to implement `HttpService<hyper::body::Incoming>`
+note: required by a bound in `hyper_util::server::conn::auto::Connection`
+    --> /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pin-project-lite-0.2.17/src/lib.rs:1682:21
+     |
+1682 |                   $(: $where_clause_bound)?
+     |                       ^^^^^^^^^^^^^^^^^^^ required by this bound in `Connection`
+     |
+    ::: /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/hyper-util-0.1.20/src/server/conn/auto/mod.rs:374:1
+     |
+ 374 | / pin_project! {
+ 375 | |     /// A [`Future`](core::future::Future) r...
+ 376 | |     /// [`Builder::serve_connection`](struct...
+ 377 | |     ///
+...    |
+ 381 | |     pub struct Connection<'a, I, S, E>
+     | |                ---------- required by a bound in this struct
+...    |
+ 388 | | }
+     | |_- in this macro invocation
+     = note: the full name for the type has been written to '/opt/rouman/target/debug/deps/rouman_daemon-301f0398f8a8ad41.long-type-15040550721037247630.txt'
+     = note: consider using `--verbose` to print the full type name to the console
+     = note: this error originates in the macro `$crate::__pin_project_parse_generics` which comes from the expansion of the macro `pin_project` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: the trait bound `bytes::Bytes: HttpBody` is not satisfied
+  --> rouman-daemon/src/proxy/mod.rs:59:18
+   |
+59 |                 .await
+   |                  ^^^^^ unsatisfied trait bound
+   |
+   = help: the trait `HttpBody` is not implemented for `bytes::Bytes`
+   = help: the following other types implement trait `HttpBody`:
+             &mut T
+             BodyStream<B>
+             Box<T>
+             BoxBody<D, E>
+             Collected<B>
+             Limited<B>
+             MapErr<B, F>
+             MapFrame<B, F>
+           and 20 others
+   = note: required for `Connection<'_, ..., ..., ...>` to implement `Future`
+   = note: required for `Connection<'_, ..., ..., ...>` to implement `IntoFuture`
+   = note: the full name for the type has been written to '/opt/rouman/target/debug/deps/rouman_daemon-301f0398f8a8ad41.long-type-15040550721037247630.txt'
+   = note: consider using `--verbose` to print the full type name to the console
+help: remove the `.await`
+   |
+59 -                 .await
+   |
+
+warning: unused variable: `domain`
+  --> rouman-daemon/src/proxy/mod.rs:22:13
+   |
+22 |         let domain = client_hello.server_name()?;
+   |             ^^^^^^ help: if this is intentional, prefix it with an underscore: `_domain`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+Some errors have detailed explanations: E0277, E0282, E0425, E0432.
+For more information about an error, try `rustc --explain E0277`.
+warning: `rouman-daemon` (bin "rouman-daemon") generated 16 warnings
+error: could not compile `rouman-daemon` (bin "rouman-daemon") due to 9 previous errors; 16 warnings emitted

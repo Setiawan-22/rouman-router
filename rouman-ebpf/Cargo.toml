@@ -1,0 +1,17 @@
+[package]
+name = "rouman-ebpf"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+aya-ebpf = "0.1.1"
+rouman-common = { path = "../rouman-common" }
+network-types = "0.1.0"
+
+[[bin]]
+name = "rouman-ebpf"
+path = "src/main.rs"
+
+
+[lib]
+path = "src/lib.rs"
