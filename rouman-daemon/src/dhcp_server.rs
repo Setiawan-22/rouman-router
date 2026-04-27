@@ -11,7 +11,7 @@ pub async fn run_dhcp_server(
     lease_pool: SharedLeasePool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Tunggu sampai konfigurasi valid
-    let (enabled, interface, range_start, range_end, gateway, dns_servers, lease_time) = {
+    let (enabled, interface, range_start, range_end, gateway, dns_servers, lease_time, subnet_mask) = {
         let cfg = config.read().await;
         let d = &cfg.network.dhcp;
         (
@@ -22,6 +22,7 @@ pub async fn run_dhcp_server(
             d.gateway.parse::<Ipv4Addr>().unwrap_or(Ipv4Addr::new(192, 168, 1, 1)),
             d.dns_servers.iter().filter_map(|s| s.parse::<Ipv4Addr>().ok()).collect::<Vec<_>>(),
             d.lease_time_secs,
+            d.subnet_mask.parse::<Ipv4Addr>().unwrap_or(Ipv4Addr::new(255, 255, 255, 0)),
         )
     };
 
@@ -69,7 +70,7 @@ pub async fn run_dhcp_server(
                     // Offer an IP
                     let offered_ip = find_available_ip(&lease_pool, range_start, range_end).await;
                     if let Some(ip) = offered_ip {
-                        let response = packet.build_response(2, ip, 2, gateway, &dns_servers, lease_time);
+                        let response = packet.build_response(2, ip, 2, gateway, &dns_servers, lease_time, subnet_mask);
                         let dest = SocketAddr::from(([255, 255, 255, 255], 68));
                         let _ = socket.send_to(&response, dest).await;
                     }
@@ -96,7 +97,7 @@ pub async fn run_dhcp_server(
                         pool.insert(mac, lease);
 
                         // Send ACK
-                        let response = packet.build_response(2, ip, 5, gateway, &dns_servers, lease_time);
+                        let response = packet.build_response(2, ip, 5, gateway, &dns_servers, lease_time, subnet_mask);
                         let dest = SocketAddr::from(([255, 255, 255, 255], 68));
                         let _ = socket.send_to(&response, dest).await;
                         println!("DHCP ACK: assigned {} to {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}", 
@@ -180,7 +181,8 @@ impl DhcpPacket {
         msg_type: u8, 
         gateway: Ipv4Addr, 
         dns: &[Ipv4Addr],
-        lease_time: u32
+        lease_time: u32,
+        subnet_mask: Ipv4Addr
     ) -> Vec<u8> {
         let mut resp = vec![0u8; 236];
         resp[0] = op;
@@ -196,8 +198,8 @@ impl DhcpPacket {
         // Option 53: Message Type
         resp.push(53); resp.push(1); resp.push(msg_type);
 
-        // Option 1: Subnet Mask (assuming /24 for now)
-        resp.push(1); resp.push(4); resp.extend_from_slice(&[255, 255, 255, 0]);
+        // Option 1: Subnet Mask
+        resp.push(1); resp.push(4); resp.extend_from_slice(&subnet_mask.octets());
 
         // Option 3: Router
         resp.push(3); resp.push(4); resp.extend_from_slice(&gateway.octets());

@@ -9,8 +9,16 @@ use axum::{
 use axum_extra::extract::cookie::{Cookie, CookieJar};
 use jsonwebtoken::{encode, decode, Header, EncodingKey, DecodingKey, Validation};
 use serde::{Deserialize, Serialize};
+use sha2::Digest;
+use crate::error::{AppError, AppResult};
 
-const JWT_SECRET: &[u8] = b"super_secret_mandala_key_change_me_later";
+fn get_jwt_secret() -> Vec<u8> {
+    let machine_id = std::fs::read_to_string("/etc/machine-id").unwrap_or_else(|_| "rouman-default-api-secret".to_string());
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(machine_id.trim().as_bytes());
+    hasher.update(b"ROUMAN_JWT_SALT_V1");
+    hasher.finalize().to_vec()
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Claims {
@@ -41,7 +49,7 @@ pub fn auth_routes() -> Router<crate::AppState> {
         .route("/me", get(me_handler).route_layer(axum::middleware::from_fn(auth_middleware)))
 }
 
-async fn login_handler(jar: CookieJar, Json(payload): Json<AuthPayload>) -> Result<(CookieJar, Json<AuthResponse>), StatusCode> {
+async fn login_handler(jar: CookieJar, Json(payload): Json<AuthPayload>) -> AppResult<(CookieJar, Json<AuthResponse>)> {
     // Hardcoded Dummy Authenticate
     if payload.username == "admin" && payload.password == "admin" {
         let expiration = chrono::Utc::now()
@@ -58,8 +66,8 @@ async fn login_handler(jar: CookieJar, Json(payload): Json<AuthPayload>) -> Resu
         let token = encode(
             &Header::default(),
             &claims,
-            &EncodingKey::from_secret(JWT_SECRET),
-        ).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            &EncodingKey::from_secret(&get_jwt_secret()),
+        ).map_err(|e| AppError::Internal(format!("Token creation failed: {}", e)))?;
 
         // Set HttpOnly Cookie
         let cookie = Cookie::build(("auth_token", token))
@@ -74,7 +82,7 @@ async fn login_handler(jar: CookieJar, Json(payload): Json<AuthPayload>) -> Resu
             Json(AuthResponse { message: "Login successful".to_owned() }),
         ))
     } else {
-        Err(StatusCode::UNAUTHORIZED)
+        Err(AppError::Unauthorized("Invalid username or password".to_owned()))
     }
 }
 
@@ -82,10 +90,12 @@ async fn logout_handler(jar: CookieJar) -> (CookieJar, Json<AuthResponse>) {
     let cookie = Cookie::build(("auth_token", ""))
         .path("/")
         .http_only(true)
+        .same_site(axum_extra::extract::cookie::SameSite::Lax)
+        .max_age(time::Duration::ZERO)
         .build();
 
     (
-        jar.remove(cookie),
+        jar.add(cookie),
         Json(AuthResponse { message: "Logged out".to_owned() })
     )
 }
@@ -97,19 +107,14 @@ async fn me_handler(claims: Claims) -> Json<MeResponse> {
 }
 
 // Extractor to parse JWT Claims directly in handler arguments 
-// (Used implicitly by the auth_middleware underneath)
 impl<S> axum::extract::FromRequestParts<S> for Claims
 where
     S: Send + Sync,
 {
-    type Rejection = StatusCode;
+    type Rejection = AppError;
 
     async fn from_request_parts(parts: &mut axum::http::request::Parts, _state: &S) -> Result<Self, Self::Rejection> {
         let headers = &parts.headers;
-
-        // In a real app we might grab the CookieJar from Request parts,
-        // but it's simpler to parse the exact cookie header manually or rely on the Jar extractor.
-        // For here, since we check cookie directly:
         let cookie_header = headers.get(header::COOKIE).and_then(|v| v.to_str().ok()).unwrap_or("");
         
         let token = cookie_header
@@ -121,22 +126,20 @@ where
             .unwrap_or("");
 
         if token.is_empty() {
-            return Err(StatusCode::UNAUTHORIZED);
+            return Err(AppError::Unauthorized("Session expired or missing".to_owned()));
         }
 
         let token_data = decode::<Claims>(
             token,
-            &DecodingKey::from_secret(JWT_SECRET),
+            &DecodingKey::from_secret(&get_jwt_secret()),
             &Validation::default(),
-        ).map_err(|_| StatusCode::UNAUTHORIZED)?;
+        ).map_err(|_| AppError::Unauthorized("Invalid session token".to_owned()))?;
 
         Ok(token_data.claims)
     }
 }
 
-pub async fn auth_middleware(req: Request, next: Next) -> Result<Response, StatusCode> {
-    // If request contains valid token (extracted by Claims via from_request_parts simulation here)
-    // Actually we can simply use the header parser logic from above.
+pub async fn auth_middleware(req: Request, next: Next) -> AppResult<Response> {
     let headers = req.headers().clone();
     let cookie_header = headers.get(header::COOKIE).and_then(|v| v.to_str().ok()).unwrap_or("");
     let token = cookie_header
@@ -148,15 +151,15 @@ pub async fn auth_middleware(req: Request, next: Next) -> Result<Response, Statu
         .unwrap_or("");
 
     if token.is_empty() {
-        return Err(StatusCode::UNAUTHORIZED);
+        return Err(AppError::Unauthorized("Authentication required".to_owned()));
     }
 
     if decode::<Claims>(
         token,
-        &DecodingKey::from_secret(JWT_SECRET),
+        &DecodingKey::from_secret(&get_jwt_secret()),
         &Validation::default(),
     ).is_err() {
-        return Err(StatusCode::UNAUTHORIZED);
+        return Err(AppError::Unauthorized("Invalid session".to_owned()));
     }
 
     Ok(next.run(req).await)

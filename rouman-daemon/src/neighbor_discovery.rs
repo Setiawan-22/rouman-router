@@ -20,12 +20,8 @@ pub async fn run_rdp_service(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("Starting RDP (Rouman Discovery Protocol) Discovery Task...");
 
-    // Ambil Secret dari machine-id untuk HMAC
-    let machine_id = std::fs::read_to_string("/etc/machine-id").unwrap_or_else(|_| "default-rdp-secret".to_string());
-    let hmac_key_vec = machine_id.trim().as_bytes().to_vec();
-
     let state_receiver = state.clone();
-    let hmac_key_receiver = hmac_key_vec.clone();
+    let config_arc_receiver = config_arc.clone();
     
     // 1. RECEIVER LOOP
     tokio::spawn(async move {
@@ -37,9 +33,9 @@ pub async fn run_rdp_service(
             }
 
             let state = state_receiver.clone();
-            let hmac_key = hmac_key_receiver.clone();
+            let config_arc = config_arc_receiver.clone();
             
-            tokio::spawn(async move {
+            tokio::task::spawn_blocking(move || {
                 let (_, mut rx) = match datalink::channel(&iface, Default::default()) {
                     Ok(Ethernet(tx, rx)) => (tx, rx),
                     _ => return,
@@ -62,12 +58,19 @@ pub async fn run_rdp_service(
                                 let signature = &payload[14..46];
                                 let json_data = &payload[46..];
 
+                                // Ambil PSK dari config (blocking read karena di thread spawn_blocking)
+                                let psk = {
+                                    let guard = config_arc.blocking_read();
+                                    guard.rdp.psk.clone()
+                                };
+                                let hmac_key = psk.as_bytes();
+
                                 // Verifikasi HMAC
-                                if let Ok(mut mac) = HmacSha256::new_from_slice(&hmac_key) {
+                                if let Ok(mut mac) = HmacSha256::new_from_slice(hmac_key) {
                                     mac.update(json_data);
                                     if mac.verify_slice(signature).is_ok() {
                                         if let Ok(neighbor_data) = serde_json::from_slice::<Neighbor>(json_data) {
-                                            let mut neighbors = state.neighbors.lock().await;
+                                            let mut neighbors = state.neighbors.blocking_lock();
                                             let mut updated_neighbor = neighbor_data.clone();
                                             updated_neighbor.last_seen = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
                                             neighbors.insert(neighbor_data.mac.clone(), updated_neighbor);
@@ -87,13 +90,12 @@ pub async fn run_rdp_service(
     });
 
     // 2. SENDER LOOP (Broadcast)
-    let hmac_key_sender = hmac_key_vec.clone();
     loop {
         tokio::time::sleep(Duration::from_secs(10)).await;
         
-        let (enabled, target_ifaces, hostname) = {
+        let (enabled, target_ifaces, hostname, psk) = {
             let conf = config_arc.read().await;
-            (conf.rdp.enabled, conf.rdp.interfaces.clone(), conf.system.hostname.clone())
+            (conf.rdp.enabled, conf.rdp.interfaces.clone(), conf.system.hostname.clone(), conf.rdp.psk.clone())
         };
 
         if !enabled { continue; }
@@ -105,6 +107,8 @@ pub async fn run_rdp_service(
         }
 
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        let hmac_key = psk.as_bytes();
+        
         let interfaces = datalink::interfaces();
         for iface in interfaces {
             if !target_ifaces.contains(&iface.name) { continue; }
@@ -114,15 +118,22 @@ pub async fn run_rdp_service(
                 _ => continue,
             };
 
+            let ip = iface.ips.iter()
+                .find(|ip| ip.is_ipv4())
+                .map(|ip| ip.ip().to_string())
+                .unwrap_or_else(|| "0.0.0.0".to_string());
+
             let neighbor_info = Neighbor {
                 hostname: hostname.clone(),
                 mac: iface.mac.unwrap().to_string(),
+                ip,
                 version: env!("CARGO_PKG_VERSION").to_string(),
                 last_seen: now,
+                neighbor_type: "Physical".to_string(),
             };
 
             if let Ok::<Vec<u8>, _>(json_vec) = serde_json::to_vec(&neighbor_info) {
-                if let Ok(mut mac) = HmacSha256::new_from_slice(&hmac_key_sender) {
+                if let Ok(mut mac) = HmacSha256::new_from_slice(hmac_key) {
                     mac.update(&json_vec);
                     let signature = mac.finalize().into_bytes();
 

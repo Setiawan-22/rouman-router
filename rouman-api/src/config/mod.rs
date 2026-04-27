@@ -48,6 +48,7 @@ pub struct DhcpConfig {
     pub range_start: String,
     pub range_end: String,
     pub gateway: String,
+    pub subnet_mask: String,
     pub dns_servers: Vec<String>,
     pub lease_time_secs: u32,
     pub static_leases: Vec<StaticLease>,
@@ -158,6 +159,7 @@ pub struct NetworkConfig {
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct CloudflareConfig {
+    pub enabled: bool,
     pub tunnels: Vec<CloudflareTunnel>,
 }
 
@@ -176,15 +178,27 @@ pub struct CloudflareIngress {
     pub service: String,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct ProxyConfig {
+    pub enabled: bool,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct FirewallConfig {
+    #[serde(default)]
+    pub enabled: bool,
     pub blacklist_ips: Vec<String>,
     pub enable_ebpf_ips: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct DnsConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    pub sinkhole_enabled: bool,
+    pub dot_enabled: bool,
     pub doh_enabled: bool,
+    pub udp_enabled: bool,
     pub doh_url: String,
     pub adblock_enabled: bool,
     pub transparent_intercept: bool,
@@ -197,9 +211,21 @@ pub struct SecurityConfig {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct RadiusConfig {
+    pub enabled: bool,
+    pub secret: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct RdpConfig {
     pub enabled: bool,
     pub interfaces: Vec<String>,
+    #[serde(default = "default_rdp_psk")]
+    pub psk: String,
+}
+
+fn default_rdp_psk() -> String {
+    "rouman-discovery-v1-secret".to_string()
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -234,6 +260,12 @@ pub struct AutomationConfig {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct ComputeConfig {
+    pub microvm_enabled: bool,
+    pub container_enabled: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct RoumanConfig {
     pub system: SystemConfig,
     pub network: NetworkConfig,
@@ -242,8 +274,13 @@ pub struct RoumanConfig {
     pub firewall: FirewallConfig,
     pub dns: DnsConfig,
     pub security: SecurityConfig,
+    pub radius: RadiusConfig,
+    pub proxy: ProxyConfig,
     pub rdp: RdpConfig,
+    #[serde(default)]
     pub automation: AutomationConfig,
+    #[serde(default)]
+    pub compute: ComputeConfig,
 }
 
 pub struct ConfigEngine {
@@ -277,7 +314,17 @@ impl ConfigEngine {
                     enable_nat: false,
                     port_forwards: Vec::new(),
                     qos: QosConfig::default(),
-                    dhcp: DhcpConfig::default(),
+                    dhcp: DhcpConfig {
+                        enabled: false,
+                        interface: "eth1".to_string(),
+                        range_start: "192.168.1.10".to_string(),
+                        range_end: "192.168.1.250".to_string(),
+                        gateway: "192.168.1.1".to_string(),
+                        subnet_mask: "255.255.255.0".to_string(),
+                        dns_servers: vec!["8.8.8.8".to_string()],
+                        lease_time_secs: 86400,
+                        static_leases: Vec::new(),
+                    },
                     pppoe: PppoeConfig {
                         enabled: false,
                         username: "".to_string(),
@@ -301,9 +348,17 @@ impl ConfigEngine {
                 },
                 wireguard: WireguardConfig::default(),
                 cloudflare: CloudflareConfig::default(),
-                firewall: FirewallConfig::default(),
+                firewall: FirewallConfig {
+                    enabled: false,
+                    blacklist_ips: vec![],
+                    enable_ebpf_ips: false,
+                },
                 dns: DnsConfig {
-                    doh_enabled: true,
+                    enabled: false,
+                    sinkhole_enabled: false,
+                    dot_enabled: false,
+                    doh_enabled: false,
+                    udp_enabled: false,
                     doh_url: "https://cloudflare-dns.com/dns-query".to_string(),
                     adblock_enabled: true,
                     transparent_intercept: true,
@@ -312,11 +367,23 @@ impl ConfigEngine {
                     encryption_enabled: true,
                     hardware_bound: true,
                 },
+                radius: RadiusConfig {
+                    enabled: false,
+                    secret: "rouman-secret-123".to_string(),
+                },
+                proxy: ProxyConfig {
+                    enabled: false,
+                },
                 rdp: RdpConfig {
-                    enabled: true,
+                    enabled: false,
                     interfaces: vec!["eth1".to_string()], // Default LAN
+                    psk: default_rdp_psk(),
                 },
                 automation: AutomationConfig::default(),
+                compute: ComputeConfig {
+                    microvm_enabled: false,
+                    container_enabled: false,
+                },
             };
             let _ = Self::save_to_disk(ACTIVE_CONFIG_PATH, &default);
             default
@@ -401,7 +468,12 @@ impl ConfigEngine {
             json_content.into_bytes()
         };
         
-        fs::write(path, final_data).map_err(|e| e.to_string())
+        // Atomic Write-Rename Pattern
+        let temp_path = format!("{}.tmp", path);
+        fs::write(&temp_path, final_data).map_err(|e| e.to_string())?;
+        fs::rename(&temp_path, path).map_err(|e| e.to_string())?;
+        
+        Ok(())
     }
 
     pub async fn commit(&self) -> Result<(), String> {

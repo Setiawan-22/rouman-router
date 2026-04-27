@@ -64,10 +64,11 @@ pub async fn apply_config(new_config: &RoumanConfig) -> Result<(), String> {
     // 2. Manipulasi Routing (NAT / Masquerade / Multi-WAN)
     let net = &new_config.network;
     
-    // Bersihkan aturan IP Rule dan Route Table lama (Reset)
-    let _ = Command::new("ip").args(["rule", "flush"]).output();
-    let _ = Command::new("ip").args(["rule", "add", "pref", "32766", "from", "all", "lookup", "main"]).output();
-    let _ = Command::new("ip").args(["rule", "add", "pref", "32767", "from", "all", "lookup", "default"]).output();
+    // Surgical Reset: Hapus hanya rule Multi-WAN lama (Priority 100-200)
+    // agar tidak memutus koneksi sistem global (ip rule flush is too dangerous)
+    for priority in 100..=200 {
+        let _ = Command::new("ip").args(["rule", "del", "priority", &priority.to_string()]).output();
+    }
 
     if net.enable_nat {
         // Aktifkan IP Forwarding
@@ -101,8 +102,8 @@ pub async fn apply_config(new_config: &RoumanConfig) -> Result<(), String> {
             let _ = Command::new("ip").args(["route", "flush", "table", &table_id.to_string()]).output();
             let _ = Command::new("ip").args(["route", "add", "default", "via", &wan.gateway, "dev", iface, "table", &table_id.to_string()]).output();
             
-            // B. IP Rule for Marking
-            let _ = Command::new("ip").args(["rule", "add", "fwmark", &mark_id.to_string(), "table", &table_id.to_string()]).output();
+            // B. IP Rule for Marking (with explicit priority for surgical cleanup)
+            let _ = Command::new("ip").args(["rule", "add", "fwmark", &mark_id.to_string(), "table", &table_id.to_string(), "priority", &mark_id.to_string()]).output();
 
             // C. PCC Logic (jhash)
             if net.lb_mode == super::LoadBalancingMode::Pcc && total_weight > 0 {
@@ -231,9 +232,10 @@ pub async fn apply_config(new_config: &RoumanConfig) -> Result<(), String> {
     }
 
     // 5. Cloudflare Zero Trust Synchronization
-    if let Err(e) = crate::network::cloudflare::sync_tunnels(&new_config.cloudflare).await {
-        return Err(format!("Cloudflare Tunnel sync failed: {}", e));
-    }
-
+    // Note: Kita butuh pool database di sini. Untuk sementara kita asumsikan 
+    // mutator bisa mendapatkan akses ke pool melalui injeksi atau singleton jika perlu.
+    // Namun dalam arsitektur Rouman, kita akan memanggilnya dari commit_config di lib.rs
+    // agar lebih bersih.
+    
     Ok(())
 }

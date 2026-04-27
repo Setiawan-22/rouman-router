@@ -8,6 +8,7 @@ pub struct ProxyHost {
     pub domain: String,
     pub upstream_url: String,
     pub ssl_enabled: bool,
+    pub node_id: String, // "local" or remote node ID
 }
 
 #[derive(Serialize, Deserialize, sqlx::FromRow)]
@@ -20,14 +21,14 @@ pub fn proxy_routes() -> Router<AppState> {
     Router::new()
         .route("/hosts", get(list_hosts))
         .route("/hosts", post(create_host))
-        .route("/hosts/:id", delete(delete_host))
+        .route("/hosts/{id}", delete(delete_host))
         .route("/settings", get(get_settings))
         .route("/settings", put(update_settings))
 }
 
 async fn list_hosts(State(state): State<AppState>) -> Json<Vec<ProxyHost>> {
     let rows = sqlx::query_as::<_, ProxyHost>(
-        "SELECT id, domain, upstream_url, ssl_enabled FROM proxy_hosts"
+        "SELECT id, domain, upstream_url, ssl_enabled, node_id FROM proxy_hosts"
     ).fetch_all(&state.db.pool).await.unwrap_or_default();
     
     Json(rows)
@@ -35,10 +36,11 @@ async fn list_hosts(State(state): State<AppState>) -> Json<Vec<ProxyHost>> {
 
 async fn create_host(State(state): State<AppState>, Json(payload): Json<ProxyHost>) -> Json<serde_json::Value> {
     let _ = sqlx::query(
-        "INSERT INTO proxy_hosts (domain, upstream_url, ssl_enabled) VALUES (?, ?, ?)"
+        "INSERT INTO proxy_hosts (domain, upstream_url, ssl_enabled, node_id) VALUES (?, ?, ?, ?)"
     ).bind(payload.domain)
      .bind(payload.upstream_url)
      .bind(payload.ssl_enabled)
+     .bind(payload.node_id)
      .execute(&state.db.pool).await;
 
     Json(serde_json::json!({ "status": "created" }))

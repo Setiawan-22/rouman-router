@@ -16,19 +16,20 @@ mod database;
 mod radius_server;
 mod hotspot_server;
 mod proxy;
+mod cloudflare_manager;
+mod compute;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
+    
+    // Initialize rustls crypto provider (required for rustls 0.23+)
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     println!("Starting Rouman Daemon (Layer 3 Control Plane)...");
 
     // Load eBPF Program
-    #[cfg(debug_assertions)]
-    let mut bpf = Ebpf::load(aya::include_bytes_aligned!(
-        "../../target/bpfel-unknown-none/debug/rouman-ebpf"
-    ))?;
-    
-    #[cfg(not(debug_assertions))]
+    // Selalu gunakan binary release untuk eBPF karena versi debug memiliki isu verifier (core::fmt)
     let mut bpf = Ebpf::load(aya::include_bytes_aligned!(
         "../../target/bpfel-unknown-none/release/rouman-ebpf"
     ))?;
@@ -37,7 +38,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         log::warn!("failed to initialize eBPF logger: {}", e);
     }
 
-    let program: &mut Xdp = bpf.program_mut("rouman_firewall").unwrap().try_into()?;
+    let program: &mut Xdp = match bpf.program_mut("rouman_firewall") {
+        Some(p) => p.try_into()?,
+        None => {
+            log::error!("eBPF program 'rouman_firewall' not found in ELF");
+            return Err("eBPF program not found".into());
+        }
+    };
     program.load()?;
     
     // Deteksi antarmuka jaringan otomatis
@@ -57,6 +64,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|e| format!("failed to attach XDP program to {}: {}", interface, e))?;
 
     println!("eBPF Firewall attached to {}", interface);
+
 
     // Jalankan API Gateway dan Web UI Serve
     let bpf_arc = Arc::new(tokio::sync::Mutex::new(bpf));
@@ -89,56 +97,122 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         auto_manager_clone.run(config_arc_auto).await;
     });
 
-    // Jalankan WAN Manager
+    // Jalankan Basis Data RADIUS
+    let db = match database::Database::new("sqlite://radius.db").await {
+        Ok(d) => Arc::new(d),
+        Err(e) => {
+            log::error!("Failed to initialize database: {}", e);
+            return Err(e.into());
+        }
+    };
+
+    // Jalankan WAN Manager (Supervised)
     let wan_manager = wan_manager::WanManager::new();
     let config_arc_wan = config_engine.get_active_config_arc();
+    let db_for_wan = db.clone();
     tokio::spawn(async move {
-        wan_manager.run(config_arc_wan).await;
-    });
-
-    // Jalankan Basis Data RADIUS
-    let db = Arc::new(database::Database::new("sqlite://radius.db").await.unwrap());
-
-    // Jalankan RADIUS Server (UDP 1812)
-    let db_radius = db.clone();
-    tokio::spawn(async move {
-        radius_server::start_radius_server(db_radius).await;
-    });
-
-    // Jalankan Hotspot Landing Page (Port 8080)
-    let db_hotspot = db.clone();
-    tokio::spawn(async move {
-        hotspot_server::run_hotspot_server(db_hotspot).await;
-    });
-
-    // Jalankan Advanced Reverse Proxy (Port 443)
-    let db_proxy = db.clone();
-    tokio::spawn(async move {
-        proxy::run_proxy_server(db_proxy).await;
-    });
-
-    // Jalankan PPPoE Manager
-    let pppoe_manager_clone = pppoe_manager.clone();
-    let config_arc_pppoe = config_engine.get_active_config_arc();
-    tokio::spawn(async move {
-        pppoe_manager_clone.run(config_arc_pppoe).await;
-    });
-
-    // Jalankan RDP Discovery
-    let rdp_state_clone = rdp_state.clone();
-    let config_arc_rdp = config_engine.get_active_config_arc();
-    tokio::spawn(async move {
-        if let Err(e) = neighbor_discovery::run_rdp_service(rdp_state_clone, config_arc_rdp).await {
-            log::error!("RDP Service error: {}", e);
+        loop {
+            log::info!("Starting WAN Manager supervisor...");
+            wan_manager.run(config_arc_wan.clone(), db_for_wan.clone()).await;
+            log::error!("WAN Manager exited unexpectedly. Restarting in 5s...");
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         }
     });
 
-    // Jalankan DHCP Server
-    let lease_pool_clone = lease_pool.clone();
-    let config_arc = config_engine.get_active_config_arc();
+    let _ = db.add_notification(
+        "Firewall Active", 
+        &format!("eBPF Firewall successfully attached to {}.", interface),
+        "success"
+    ).await;
+
+    let config_arc_active = config_engine.get_active_config_arc();
+    
+    // Extract all needed config flags, then DROP the read lock immediately
+    // to avoid deadlocking the config when the API tries to write.
+    let (
+        radius_enabled, proxy_enabled, cloudflare_enabled,
+        pppoe_enabled, rdp_enabled
+    ) = {
+        let config_val = config_arc_active.read().await;
+        (
+            config_val.radius.enabled,
+            config_val.proxy.enabled,
+            config_val.cloudflare.enabled,
+            config_val.network.pppoe.enabled,
+            config_val.rdp.enabled,
+        )
+    }; // read lock dropped here
+
+    // Jalankan RADIUS Server (UDP 1812)
+    if radius_enabled {
+        let db_radius = db.clone();
+        tokio::spawn(async move {
+            radius_server::start_radius_server(db_radius).await;
+        });
+    }
+
+    // Jalankan Hotspot Landing Page (Port 8080)
+    let db_hotspot = db.clone();
+    let bpf_hotspot = bpf_arc.clone();
     tokio::spawn(async move {
-        if let Err(e) = dhcp_server::run_dhcp_server(config_arc, lease_pool_clone).await {
-            log::error!("DHCP Server error: {}", e);
+        hotspot_server::run_hotspot_server(db_hotspot, bpf_hotspot).await;
+    });
+
+    // Jalankan Advanced Reverse Proxy (Port 443)
+    if proxy_enabled {
+        let db_proxy = db.clone();
+        tokio::spawn(async move {
+            proxy::run_proxy_server(db_proxy).await;
+        });
+    }
+
+    // Jalankan Cloudflare Tunnel Manager (Supervisor)
+    if cloudflare_enabled {
+        let db_cf = db.clone();
+        tokio::spawn(async move {
+            loop {
+                log::info!("Starting Cloudflare Manager supervisor...");
+                let mut cf_manager = cloudflare_manager::CloudflareManager::new(db_cf.clone());
+                cf_manager.run().await;
+                log::error!("Cloudflare Manager crashed. Restarting in 10s...");
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            }
+        });
+    }
+
+    // Jalankan Edge Compute Manager (Firecracker & Containerd Isolation Network)
+    let _compute_manager = compute::ComputeManager::new();
+
+    // Jalankan PPPoE Manager
+    if pppoe_enabled {
+        let pppoe_manager_clone = pppoe_manager.clone();
+        let config_arc_pppoe = config_engine.get_active_config_arc();
+        tokio::spawn(async move {
+            pppoe_manager_clone.run(config_arc_pppoe).await;
+        });
+    }
+
+    // Jalankan RDP Discovery
+    if rdp_enabled {
+        let rdp_state_clone = rdp_state.clone();
+        let config_arc_rdp = config_engine.get_active_config_arc();
+        tokio::spawn(async move {
+            if let Err(e) = neighbor_discovery::run_rdp_service(rdp_state_clone, config_arc_rdp).await {
+                log::error!("RDP Service error: {}", e);
+            }
+        });
+    }
+
+    // Jalankan DHCP Server (Supervised)
+    let lease_pool_clone = lease_pool.clone();
+    let config_arc_dhcp = config_engine.get_active_config_arc();
+    tokio::spawn(async move {
+        loop {
+            log::info!("Starting DHCP Server supervisor...");
+            if let Err(e) = dhcp_server::run_dhcp_server(config_arc_dhcp.clone(), lease_pool_clone.clone()).await {
+                log::error!("DHCP Server error: {}. Restarting in 5s...", e);
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         }
     });
 
@@ -156,16 +230,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
 
             let mut bpf = bpf_for_sni.lock().await;
-            if let Ok(mut sni_map) = aya::maps::HashMap::<_, [u8; 32], u32>::try_from(bpf.map_mut("SNI_BLACKLIST").unwrap()) {
-                // Clear map (atau update selisihnya, tapi clear-reload paling aman untuk demo)
-                // Note: Aya HashMap tidak punya clear(), jadi kita biarkan menumpuk atau kelola manual.
-                // Untuk kesederhanaan, kita masukkan yang baru.
-                for domain in blocked {
-                    let mut key = [0u8; 32];
-                    let bytes = domain.as_bytes();
-                    let len = bytes.len().min(32);
-                    key[..len].copy_from_slice(&bytes[..len]);
-                    let _ = sni_map.insert(key, 1, 0);
+            if let Some(map) = bpf.map_mut("SNI_BLACKLIST") {
+                if let Ok(mut sni_map) = aya::maps::HashMap::<_, [u8; 32], u32>::try_from(map) {
+                    for domain in blocked {
+                        let mut key = [0u8; 32];
+                        let bytes = domain.as_bytes();
+                        let len = bytes.len().min(32);
+                        key[..len].copy_from_slice(&bytes[..len]);
+                        let _ = sni_map.insert(key, 1, 0);
+                    }
+                }
+            } else {
+                // Log only once per minute to avoid spam if map is missing
+                static mut LAST_WARN: u64 = 0;
+                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+                unsafe {
+                    if now - LAST_WARN > 60 {
+                        log::warn!("SNI_BLACKLIST map not found - DNS filtering might be limited");
+                        LAST_WARN = now;
+                    }
                 }
             }
         }
@@ -174,14 +257,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let dns_state_server = dns_state.clone();
     let config_arc_server = config_engine.get_active_config_arc();
     tokio::spawn(async move {
-        if let Err(e) = dns_server::run_dns_server(dns_state_server, config_arc_server).await {
-            log::error!("DNS Server error: {}", e);
+        loop {
+            log::info!("Starting DNS Server supervisor...");
+            if let Err(e) = dns_server::run_dns_server(dns_state_server.clone(), config_arc_server.clone()).await {
+                log::error!("DNS Server error: {}. Restarting in 5s...", e);
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         }
     });
 
     println!("Press Ctrl+C to terminate and detach eBPF...");
     signal::ctrl_c().await?;
     println!("Detaching eBPF and exiting...");
-
-    Ok(())
+    std::process::exit(0);
 }

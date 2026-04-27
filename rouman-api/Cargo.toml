@@ -28,3 +28,6 @@ rand = "0.8"
 aes-gcm = "0.10.3"
 sha2 = "0.11.0"
 sqlx = { version = "0.8.6", features = ["sqlite", "runtime-tokio-rustls", "macros"] }
+time = "0.3.37"
+lazy_static = "1.5.0"
+anyhow = "1.0.102"

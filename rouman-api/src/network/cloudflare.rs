@@ -2,28 +2,27 @@ use crate::config::CloudflareConfig;
 use crate::AppState;
 use axum::{extract::State, Json};
 use serde_json::{json, Value};
-use std::process::{Command, Stdio};
+use std::process::Command;
+use crate::database::Database;
 
-pub async fn sync_tunnels(config: &CloudflareConfig) -> Result<(), String> {
-    // 1. Matikan semua proses cloudflared lama agar bersih (pendekatan sederhana)
-    // Di masa depan kita bisa mematikan per tunnel ID menggunakan PID tracking
-    let _ = Command::new("killall").arg("cloudflared").output();
-
+pub async fn sync_tunnels(config: &CloudflareConfig, db: &Database) -> Result<(), String> {
+    // Sinkronisasi setiap tunnel di config ke database
     for tunnel in &config.tunnels {
-        if tunnel.enabled {
-            if tunnel.token.is_empty() {
-                continue;
-            }
-
-            let child = Command::new("cloudflared")
-                .args(["tunnel", "run", "--token", &tunnel.token])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .map_err(|e| format!("Gagal menjalankan tunnel {}: {}", tunnel.name, e))?;
-            
-            println!("Tunnel {} started with PID: {}", tunnel.name, child.id());
-        }
+        sqlx::query(
+            "INSERT INTO cloudflare_tunnels (id, name, token, enabled) 
+             VALUES (?, ?, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET 
+             name = excluded.name,
+             token = excluded.token,
+             enabled = excluded.enabled"
+        )
+        .bind(&tunnel.id)
+        .bind(&tunnel.name)
+        .bind(&tunnel.token)
+        .bind(tunnel.enabled)
+        .execute(&db.pool)
+        .await
+        .map_err(|e| format!("DB Sync Error: {}", e))?;
     }
 
     Ok(())

@@ -7,9 +7,8 @@ use aya_ebpf::{
     programs::XdpContext,
 };
 
-use core::mem;
 use network_types::{
-    eth::{EthHdr, EtherType},
+    eth::EthHdr,
     ip::{Ipv4Hdr, IpProto},
     tcp::TcpHdr,
 };
@@ -29,49 +28,109 @@ const STAT_DROPPED: u32 = 1;
 
 #[xdp]
 pub fn rouman_firewall(ctx: XdpContext) -> u32 {
-    match try_rouman_firewall(&ctx) {
-        Ok(ret) => ret,
-        Err(_) => xdp_action::XDP_ABORTED,
+    let start = ctx.data();
+    let end = ctx.data_end();
+    let mut action = xdp_action::XDP_PASS;
+
+    // 1. Ethernet Header
+    if start + EthHdr::LEN <= end {
+        let ethhdr = start as *const EthHdr;
+        if unsafe { u16::from_be((*ethhdr).ether_type) } == 0x0800 {
+            // 2. IPv4 Header
+            if start + EthHdr::LEN + Ipv4Hdr::LEN <= end {
+                let ipv4hdr = (start + EthHdr::LEN) as *const Ipv4Hdr;
+                let source_addr = u32::from_ne_bytes(unsafe { (*ipv4hdr).src_addr });
+
+                if let Some(val) = STATS.get_ptr_mut(STAT_TOTAL) {
+                    unsafe { *val += 1 };
+                }
+
+                if unsafe { BLACKLIST.get(&source_addr) }.is_some() {
+                    if let Some(val) = STATS.get_ptr_mut(STAT_DROPPED) {
+                        unsafe { *val += 1 };
+                    }
+                    action = xdp_action::XDP_DROP;
+                } else {
+                    // 3. TCP Check
+                    if unsafe { (*ipv4hdr).proto } == IpProto::Tcp {
+                        // Standard Offset for TLS in typical TCP/IP (14+20+20=54)
+                        let mut sni = [0u8; 32];
+                        if extract_sni_fixed(&ctx, &mut sni) == 1 {
+                            if unsafe { SNI_BLACKLIST.get(&sni) }.is_some() {
+                                if let Some(val) = STATS.get_ptr_mut(STAT_DROPPED) {
+                                    unsafe { *val += 1 };
+                                }
+                                action = xdp_action::XDP_DROP;
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
+
+    action
 }
 
-fn try_rouman_firewall(ctx: &XdpContext) -> Result<u32, u32> {
-    let ethhdr: *const EthHdr = unsafe { ptr_at(ctx, 0)? };
-    match u16::from_be(unsafe { (*ethhdr).ether_type }) {
-        0x0800 => {} // IPv4
-        _ => return Ok(xdp_action::XDP_PASS),
-    }
+/// Fixed-offset SNI extraction to satisfy restrictive verifiers.
+/// Uses only constant offsets from the packet start to avoid variable-offset pointer math.
+fn extract_sni_fixed(ctx: &XdpContext, res: &mut [u8; 32]) -> u32 {
+    let start = ctx.data();
+    let end = ctx.data_end();
 
-    let ipv4hdr: *const Ipv4Hdr = unsafe { ptr_at(ctx, EthHdr::LEN)? };
-    let source_addr = u32::from_ne_bytes(unsafe { (*ipv4hdr).src_addr });
-
-    // Update Statistik Total
-    if let Some(val) = STATS.get_ptr_mut(STAT_TOTAL) {
-        unsafe { *val += 1 };
-    }
-
-    // Cek Blacklist
-    if unsafe { BLACKLIST.get(&source_addr) }.is_some() {
-        if let Some(val) = STATS.get_ptr_mut(STAT_DROPPED) {
-            unsafe { *val += 1 };
+    // We scan common TLS payload starts: 54 (Standard), 66 (with IPv4 Options or TCP Options)
+    // We'll search around these areas using CONSTANT offsets.
+    
+    // Check if it's likely a TLS Handshake at standard offset 54
+    if start + 60 <= end {
+        if unsafe { *((start + 54) as *const u8) } == 0x16 {
+            // Search for SNI pattern [0x00, 0x00, ..., 0x00]
+            // We unroll a small loop of constant offsets
+            if check_sni_at(start, end, 54 + 43, res) == 1 { return 1; }
+            if check_sni_at(start, end, 54 + 43 + 32, res) == 1 { return 1; }
+            if check_sni_at(start, end, 54 + 43 + 64, res) == 1 { return 1; }
+            if check_sni_at(start, end, 54 + 43 + 96, res) == 1 { return 1; }
         }
-        return Ok(xdp_action::XDP_DROP);
+    }
+    
+    // Also check offset 74 (e.g. 20 bytes of TCP options)
+    if start + 80 <= end {
+        if unsafe { *((start + 74) as *const u8) } == 0x16 {
+            if check_sni_at(start, end, 74 + 43, res) == 1 { return 1; }
+            if check_sni_at(start, end, 74 + 43 + 32, res) == 1 { return 1; }
+            if check_sni_at(start, end, 74 + 43 + 64, res) == 1 { return 1; }
+        }
     }
 
-    Ok(xdp_action::XDP_PASS)
+    0
 }
 
 #[inline(always)]
-unsafe fn ptr_at<T>(ctx: &XdpContext, offset: usize) -> Result<*const T, u32> {
-    let start = ctx.data();
-    let end = ctx.data_end();
-    let len = mem::size_of::<T>();
-
-    if start + offset + len > end {
-        return Err(xdp_action::XDP_ABORTED);
+fn check_sni_at(start: usize, end: usize, off: usize, res: &mut [u8; 32]) -> u32 {
+    // We scan a window of 32 bytes starting at 'off' for the SNI extension
+    for i in 0..8 {
+        let p = start + off + (i * 4);
+        if p + 14 > end { break; }
+        
+        unsafe {
+            if *(p as *const u8) == 0 && *((p + 1) as *const u8) == 0 {
+                if *((p + 4) as *const u8) == 0 && *((p + 6) as *const u8) == 0 {
+                    let nlen = (((*((p + 7) as *const u8) as usize) << 8) | (*((p + 8) as *const u8) as usize)) & 0xFFFF;
+                    let name_p = p + 9;
+                    if name_p + 32 <= end {
+                        let copy = if nlen > 32 { 32 } else { nlen };
+                        for j in 0..32 {
+                            if j < copy {
+                                res[j] = *((name_p + j) as *const u8);
+                            }
+                        }
+                        return 1;
+                    }
+                }
+            }
+        }
     }
-
-    Ok((start + offset) as *const T)
+    0
 }
 
 #[panic_handler]

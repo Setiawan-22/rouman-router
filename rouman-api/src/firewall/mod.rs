@@ -13,7 +13,23 @@ pub async fn get_stats(
 ) -> Json<serde_json::Value> {
     let fw = &state.firewall_state;
     let bpf = fw.ebpf.lock().await;
-    let stats: Array<_, u64> = Array::try_from(bpf.map("STATS").unwrap()).unwrap();
+    
+    // Safely attempt to get the STATS map
+    let stats_map = bpf.map("STATS");
+    if stats_map.is_none() {
+        return Json(serde_json::json!({
+            "status": "inactive",
+            "engine": "None",
+            "total_packets": 0,
+            "dropped_packets": 0,
+            "warning": "eBPF map STATS not found (Dev Mode?)"
+        }));
+    }
+
+    let stats: Array<_, u64> = match Array::try_from(stats_map.unwrap()) {
+        Ok(it) => it,
+        Err(_) => return Json(serde_json::json!({ "status": "error", "error": "Invalid map type" })),
+    };
     
     // Indeks 0 = Total, 1 = Dropped
     let total_packets = stats.get(&0, 0).unwrap_or(0);
@@ -39,7 +55,15 @@ pub async fn add_blacklist(
     };
 
     let mut bpf = fw.ebpf.lock().await;
-    let mut blacklist: HashMap<_, u32, u32> = HashMap::try_from(bpf.map_mut("BLACKLIST").unwrap()).unwrap();
+    let map = bpf.map_mut("BLACKLIST");
+    if map.is_none() {
+        return Json(serde_json::json!({ "error": "Firewall engine inactive (BLACKLIST map missing)" }));
+    }
+
+    let mut blacklist: HashMap<_, u32, u32> = match HashMap::try_from(map.unwrap()) {
+        Ok(it) => it,
+        Err(_) => return Json(serde_json::json!({ "error": "Invalid map type" })),
+    };
     
     let ip_u32 = u32::from(ip);
     if let Err(e) = blacklist.insert(ip_u32, 1, 0) {

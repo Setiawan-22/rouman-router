@@ -5,6 +5,7 @@ use tokio::time::{timeout, Duration};
 use tokio::sync::Mutex;
 use serde::Deserialize;
 use std::time::SystemTime;
+use sqlx::Row;
 
 pub mod auth;
 pub mod services;
@@ -14,7 +15,8 @@ pub mod firewall;
 pub mod dns;
 pub mod automation;
 pub mod database;
-
+pub mod compute;
+pub mod error;
 #[derive(Clone)]
 pub struct AppState {
     pub config_engine: Arc<config::ConfigEngine>,
@@ -71,7 +73,7 @@ pub async fn start_api_server(
         .not_found_service(ServeFile::new("ui/build/index.html"));
 
     let config_engine = config::ConfigEngine::new().await;
-    let db = Arc::new(database::Database::new("sqlite://radius.db").await.unwrap());
+    let db = Arc::new(database::Database::new("sqlite:/opt/rouman/radius.db").await.expect("Failed to open database"));
     let dns_state = Arc::new(dns::DnsState::default());
     let lease_pool = network::dhcp::SharedLeasePool::default();
     let firewall_state = Arc::new(firewall::FirewallState { ebpf: bpf });
@@ -97,6 +99,8 @@ pub async fn start_api_server(
             .route("/system/info", get(|| async { "Rouman System: OK" }))
             .route("/system/internet-status", get(internet_status))
             .route("/system/telemetry", get(telemetry))
+            .route("/system/update/check", post(system_update_check))
+            .route("/system/update/upgrade", post(system_update_upgrade))
             .route("/network/interfaces", get(interfaces_handler))
             .route("/network/leases", get(leases_handler))
             .route("/services/cloudflare/start", post(cf_start))
@@ -105,7 +109,7 @@ pub async fn start_api_server(
             .route("/config/active", get(config::get_active))
             .route("/config/candidate", get(config::get_candidate))
             .route("/config/candidate", axum::routing::put(config::put_candidate))
-            .route("/config/commit", post(config::commit_config))
+            .route("/config/commit", post(commit_config))
             .route("/config/rollback", post(config::rollback_config))
             .nest("/firewall", Router::<AppState>::new()
                 .route("/stats", get(firewall::get_stats))
@@ -114,17 +118,19 @@ pub async fn start_api_server(
             .nest("/dns", dns::dns_routes())
             .nest("/radius", network::radius::radius_routes())
             .nest("/proxy", network::proxy::proxy_routes())
+            .nest("/compute", compute::compute_routes())
             .nest("/network", Router::<AppState>::new()
                 .route("/wireguard/config", get(network::wireguard::get_wireguard_config))
                 .route("/wireguard/status", get(network::wireguard::get_wg_status))
                 .route("/wireguard/generate-keys", post(network::wireguard::generate_keys))
-                .route("/wireguard/client-config/:iface/:peer", get(network::wireguard::get_client_config))
+                .route("/wireguard/client-config/{iface}/{peer}", get(network::wireguard::get_client_config))
                 .route("/cloudflare/config", get(network::cloudflare::get_config))
                 .route("/cloudflare/check", get(network::cloudflare::check_binary))
                 .route("/neighbors", get(network::neighbors::get_neighbors))
                 .route("/pppoe/status", get(network::pppoe::get_pppoe_status))
                 .route("/automation/test", post(automation::run_test_script))
             )
+            .nest("/notifications", services::notifications::notification_routes())
             .route_layer(axum::middleware::from_fn(auth::auth_middleware))
         )
         .with_state(state)
@@ -172,23 +178,40 @@ struct CfStartPayload {
     token: String,
 }
 
-async fn cf_start(State(_): State<AppState>, Json(payload): Json<CfStartPayload>) -> Json<serde_json::Value> {
-    match services::cloudflared::start(&payload.token).await {
-        Ok(_) => Json(serde_json::json!({ "status": "started" })),
+async fn cf_start(State(state): State<AppState>, Json(payload): Json<CfStartPayload>) -> Json<serde_json::Value> {
+    match sqlx::query("UPDATE cloudflare_tunnels SET enabled = 1 WHERE token = ?")
+        .bind(&payload.token)
+        .execute(&state.db.pool)
+        .await 
+    {
+        Ok(_) => Json(serde_json::json!({ "status": "instruction_sent_to_daemon" })),
         Err(e) => Json(serde_json::json!({ "error": format!("{:?}", e) })),
     }
 }
 
-async fn cf_stop(State(_): State<AppState>) -> Json<serde_json::Value> {
-    match services::cloudflared::stop().await {
-        Ok(_) => Json(serde_json::json!({ "status": "stopped" })),
+async fn cf_stop(State(state): State<AppState>, Json(payload): Json<CfStartPayload>) -> Json<serde_json::Value> {
+    match sqlx::query("UPDATE cloudflare_tunnels SET enabled = 0 WHERE token = ?")
+        .bind(&payload.token)
+        .execute(&state.db.pool)
+        .await 
+    {
+        Ok(_) => Json(serde_json::json!({ "status": "instruction_sent_to_daemon" })),
         Err(e) => Json(serde_json::json!({ "error": format!("{:?}", e) })),
     }
 }
 
-async fn cf_status(State(_): State<AppState>) -> Json<serde_json::Value> {
-    let running = services::cloudflared::status().await;
-    Json(serde_json::json!({ "running": running }))
+async fn cf_status(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let row = sqlx::query("SELECT status FROM cloudflare_tunnels LIMIT 1")
+        .fetch_optional(&state.db.pool)
+        .await
+        .unwrap_or(None);
+    
+    let status = match row {
+        Some(r) => r.get::<String, _>("status"),
+        None => "not_configured".to_string(),
+    };
+    
+    Json(serde_json::json!({ "status": status }))
 }
 
 static SYSTEM_INFO: Mutex<Option<sysinfo::System>> = Mutex::const_new(None);
@@ -218,9 +241,68 @@ async fn telemetry(State(_): State<AppState>) -> Json<serde_json::Value> {
     }))
 }
 
+pub async fn commit_config(State(state): State<crate::AppState>) -> Json<serde_json::Value> {
+    let engine = &state.config_engine;
+    match engine.commit().await {
+        Ok(_) => {
+            // Setelah commit sukses, sinkronkan tunnel ke database bersama
+            let config = engine.active.read().await;
+            if let Err(e) = network::cloudflare::sync_tunnels(&config.cloudflare, &state.db).await {
+                return Json(serde_json::json!({ "status": "warning", "message": format!("Commit OK, but tunnel sync failed: {}", e) }));
+            }
+            Json(serde_json::json!({ "status": "success", "message": "Commit successful" }))
+        },
+        Err(e) => Json(serde_json::json!({ "status": "error", "message": e })),
+    }
+}
+
 async fn interfaces_handler(State(_): State<AppState>) -> Json<serde_json::Value> {
     match network::interfaces::get_all_interfaces().await {
         Ok(ifaces) => Json(serde_json::json!({ "interfaces": ifaces })),
         Err(e) => Json(serde_json::json!({ "error": e })),
+    }
+}
+
+async fn system_update_check(State(_): State<AppState>) -> Json<serde_json::Value> {
+    // Jalankan apt update secara asinkron
+    let output = tokio::process::Command::new("sh")
+        .arg("-c")
+        .arg("apt-get update && apt-get --just-print upgrade")
+        .output()
+        .await;
+
+    match output {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+            Json(serde_json::json!({
+                "status": "success",
+                "stdout": stdout,
+                "stderr": stderr
+            }))
+        }
+        Err(e) => Json(serde_json::json!({ "status": "error", "message": format!("{}", e) })),
+    }
+}
+
+async fn system_update_upgrade(State(_): State<AppState>) -> Json<serde_json::Value> {
+    // Jalankan upgrade (tanpa konfirmasi interaktif)
+    let output = tokio::process::Command::new("sh")
+        .arg("-c")
+        .arg("DEBIAN_FRONTEND=noninteractive apt-get upgrade -y")
+        .output()
+        .await;
+
+    match output {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+            Json(serde_json::json!({
+                "status": "success",
+                "stdout": stdout,
+                "stderr": stderr
+            }))
+        }
+        Err(e) => Json(serde_json::json!({ "status": "error", "message": format!("{}", e) })),
     }
 }

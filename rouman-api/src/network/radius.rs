@@ -26,7 +26,7 @@ pub fn radius_routes() -> Router<AppState> {
         .route("/users", get(list_users))
         .route("/users", post(create_user))
         .route("/vouchers/generate", post(generate_vouchers))
-        .route("/users/:username", delete(delete_user))
+        .route("/users/{username}", delete(delete_user))
         .route("/profiles", get(list_profiles))
 }
 

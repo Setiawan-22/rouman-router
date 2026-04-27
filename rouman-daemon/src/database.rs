@@ -80,9 +80,13 @@ impl Database {
                 domain TEXT UNIQUE NOT NULL,
                 upstream_url TEXT NOT NULL,
                 ssl_enabled BOOLEAN DEFAULT TRUE,
+                node_id TEXT DEFAULT 'local',
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )"
         ).execute(&self.pool).await?;
+
+        // Migration: Add node_id if it doesn't exist
+        let _ = sqlx::query("ALTER TABLE proxy_hosts ADD COLUMN node_id TEXT DEFAULT 'local'").execute(&self.pool).await;
 
         // 6. SSL Certificates Storage
         sqlx::query(
@@ -94,11 +98,45 @@ impl Database {
             )"
         ).execute(&self.pool).await?;
 
+        // 7. Cloudflare Tunnels (Zero Trust)
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS cloudflare_tunnels (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                token TEXT NOT NULL,
+                enabled BOOLEAN DEFAULT FALSE,
+                status TEXT DEFAULT 'offline',
+                last_error TEXT,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )"
+        ).execute(&self.pool).await?;
+
+        // 8. System Notifications
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS notifications (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                message TEXT NOT NULL,
+                type TEXT NOT NULL,
+                is_read BOOLEAN DEFAULT FALSE,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )"
+        ).execute(&self.pool).await?;
+
         // Tambahkan profil default jika kosong
         let _ = sqlx::query(
             "INSERT OR IGNORE INTO radius_profiles (name, upload_mbps, download_mbps) VALUES ('default', 2, 5)"
         ).execute(&self.pool).await?;
 
+        Ok(())
+    }
+    pub async fn add_notification(&self, title: &str, message: &str, n_type: &str) -> Result<(), sqlx::Error> {
+        sqlx::query("INSERT INTO notifications (title, message, type) VALUES (?, ?, ?)")
+            .bind(title)
+            .bind(message)
+            .bind(n_type)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 }
