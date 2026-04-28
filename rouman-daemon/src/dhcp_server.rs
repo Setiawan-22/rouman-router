@@ -9,6 +9,7 @@ use rouman_api::network::dhcp::{SharedLeasePool, DhcpLease};
 pub async fn run_dhcp_server(
     config: Arc<RwLock<RoumanConfig>>,
     lease_pool: SharedLeasePool,
+    db: Arc<crate::database::Database>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Tunggu sampai konfigurasi valid
     let (enabled, interface, range_start, range_end, gateway, dns_servers, lease_time, subnet_mask) = {
@@ -91,17 +92,22 @@ pub async fn run_dhcp_server(
                         let lease = DhcpLease {
                             mac,
                             ip,
-                            hostname: None, // Bisa diekstrak dari Option 12 jika mau
+                            hostname: None, 
                             expires: SystemTime::now() + Duration::from_secs(lease_time as u64),
                         };
+                        let expires_at = lease.expires.duration_since(std::time::SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
                         pool.insert(mac, lease);
+
+                        // Save to Database for Persistence
+                        let mac_str = format!("{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}", 
+                                             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+                        let _ = db.save_dhcp_lease(&mac_str, &ip.to_string(), None, expires_at).await;
 
                         // Send ACK
                         let response = packet.build_response(2, ip, 5, gateway, &dns_servers, lease_time, subnet_mask);
                         let dest = SocketAddr::from(([255, 255, 255, 255], 68));
                         let _ = socket.send_to(&response, dest).await;
-                        println!("DHCP ACK: assigned {} to {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}", 
-                                ip, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+                        println!("DHCP ACK: assigned {} to {}", ip, mac_str);
                     }
                 },
                 _ => {}

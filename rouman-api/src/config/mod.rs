@@ -10,13 +10,19 @@ use aes_gcm::{
 };
 use sha2::{Digest, Sha256};
 
-const ACTIVE_CONFIG_PATH: &str = "/opt/rouman/config/active.json";
-const CANDIDATE_CONFIG_PATH: &str = "/opt/rouman/config/candidate.json";
+const ACTIVE_CONFIG_PATH: &str = "/etc/rouman/active.json";
+const CANDIDATE_CONFIG_PATH: &str = "/etc/rouman/candidate.json";
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct SystemConfig {
     pub hostname: String,
     pub description: String,
+    #[serde(default = "default_cluster_token")]
+    pub cluster_token: String,
+}
+
+fn default_cluster_token() -> String {
+    "".to_string()
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -259,10 +265,23 @@ pub struct AutomationConfig {
     pub scripts: Vec<CustomScript>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ComputeConfig {
     pub microvm_enabled: bool,
     pub container_enabled: bool,
+    pub cluster_subnet: String,
+    pub bridge_subnet: String,
+}
+
+impl Default for ComputeConfig {
+    fn default() -> Self {
+        Self {
+            microvm_enabled: false,
+            container_enabled: false,
+            cluster_subnet: "10.42.0.0/24".to_string(),
+            bridge_subnet: "10.10.10.1/24".to_string(),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -292,11 +311,13 @@ pub mod mutator;
 
 impl ConfigEngine {
     pub async fn new() -> Arc<Self> {
-        let active = Self::load_from_disk(ACTIVE_CONFIG_PATH).unwrap_or_else(|| {
+        std::fs::create_dir_all("/etc/rouman").ok();
+        let mut active = Self::load_from_disk(ACTIVE_CONFIG_PATH).unwrap_or_else(|| {
             let default = RoumanConfig {
                 system: SystemConfig {
                     hostname: "rouman-core".to_string(),
                     description: "Rouman OS Next-Gen Router".to_string(),
+                    cluster_token: "".to_string(),
                 },
                 network: NetworkConfig {
                     wans: vec![
@@ -341,7 +362,7 @@ impl ConfigEngine {
                                 address: "192.168.1.1/24".to_string(),
                                 gateway: None,
                                 enabled: true,
-                            }
+                             }
                         ],
                     },
                     simple_queues: Vec::new(),
@@ -383,11 +404,50 @@ impl ConfigEngine {
                 compute: ComputeConfig {
                     microvm_enabled: false,
                     container_enabled: false,
+                    cluster_subnet: "10.42.0.0/24".to_string(),
+                    bridge_subnet: "10.10.10.1/24".to_string(),
                 },
             };
             let _ = Self::save_to_disk(ACTIVE_CONFIG_PATH, &default);
             default
         });
+
+        // SECURITY FIX: Randomize default secrets if they are still insecure
+        let mut changed = false;
+        if active.radius.secret == "rouman-secret-123" {
+            use rand::Rng;
+            let rng = rand::thread_rng();
+            active.radius.secret = rng
+                .sample_iter(&rand::distributions::Alphanumeric)
+                .take(32)
+                .map(char::from)
+                .collect();
+            changed = true;
+        }
+        if active.rdp.psk == "rouman-discovery-v1-secret" {
+            use rand::Rng;
+            let rng = rand::thread_rng();
+            active.rdp.psk = rng
+                .sample_iter(&rand::distributions::Alphanumeric)
+                .take(32)
+                .map(char::from)
+                .collect();
+            changed = true;
+        }
+        if active.system.cluster_token.is_empty() || active.system.cluster_token == "default_cluster_token" {
+            use rand::Rng;
+            let rng = rand::thread_rng();
+            active.system.cluster_token = rng
+                .sample_iter(&rand::distributions::Alphanumeric)
+                .take(32)
+                .map(char::from)
+                .collect();
+            changed = true;
+        }
+
+        if changed {
+            let _ = Self::save_to_disk(ACTIVE_CONFIG_PATH, &active);
+        }
 
         let candidate = Self::load_from_disk(CANDIDATE_CONFIG_PATH).unwrap_or_else(|| {
             active.clone()

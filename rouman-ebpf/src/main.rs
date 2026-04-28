@@ -53,9 +53,9 @@ pub fn rouman_firewall(ctx: XdpContext) -> u32 {
                 } else {
                     // 3. TCP Check
                     if unsafe { (*ipv4hdr).proto } == IpProto::Tcp {
-                        // Standard Offset for TLS in typical TCP/IP (14+20+20=54)
+                        // Dynamic Offset for TLS based on IPv4 IHL and TCP Data Offset
                         let mut sni = [0u8; 32];
-                        if extract_sni_fixed(&ctx, &mut sni) == 1 {
+                        if extract_sni_dynamic(&ctx, &mut sni) == 1 {
                             if unsafe { SNI_BLACKLIST.get(&sni) }.is_some() {
                                 if let Some(val) = STATS.get_ptr_mut(STAT_DROPPED) {
                                     unsafe { *val += 1 };
@@ -72,34 +72,46 @@ pub fn rouman_firewall(ctx: XdpContext) -> u32 {
     action
 }
 
-/// Fixed-offset SNI extraction to satisfy restrictive verifiers.
-/// Uses only constant offsets from the packet start to avoid variable-offset pointer math.
-fn extract_sni_fixed(ctx: &XdpContext, res: &mut [u8; 32]) -> u32 {
+/// Dynamic SNI extraction that calculates exact IPv4 and TCP header lengths.
+/// This prevents SNI extraction failures on packets with IPv4/TCP options.
+fn extract_sni_dynamic(ctx: &XdpContext, res: &mut [u8; 32]) -> u32 {
     let start = ctx.data();
     let end = ctx.data_end();
 
-    // We scan common TLS payload starts: 54 (Standard), 66 (with IPv4 Options or TCP Options)
-    // We'll search around these areas using CONSTANT offsets.
+    // 1. Check if Ethernet header fits
+    if start + 14 > end { return 0; }
     
-    // Check if it's likely a TLS Handshake at standard offset 54
-    if start + 60 <= end {
-        if unsafe { *((start + 54) as *const u8) } == 0x16 {
-            // Search for SNI pattern [0x00, 0x00, ..., 0x00]
-            // We unroll a small loop of constant offsets
-            if check_sni_at(start, end, 54 + 43, res) == 1 { return 1; }
-            if check_sni_at(start, end, 54 + 43 + 32, res) == 1 { return 1; }
-            if check_sni_at(start, end, 54 + 43 + 64, res) == 1 { return 1; }
-            if check_sni_at(start, end, 54 + 43 + 96, res) == 1 { return 1; }
-        }
-    }
+    // 2. Read IPv4 IHL (Internet Header Length)
+    if start + 14 + 1 > end { return 0; }
+    let ihl = (unsafe { *((start + 14) as *const u8) } & 0x0F) * 4;
+    let ipv4_len = ihl as usize;
     
-    // Also check offset 74 (e.g. 20 bytes of TCP options)
-    if start + 80 <= end {
-        if unsafe { *((start + 74) as *const u8) } == 0x16 {
-            if check_sni_at(start, end, 74 + 43, res) == 1 { return 1; }
-            if check_sni_at(start, end, 74 + 43 + 32, res) == 1 { return 1; }
-            if check_sni_at(start, end, 74 + 43 + 64, res) == 1 { return 1; }
-        }
+    // eBPF Verifier help: Bound the length
+    if ipv4_len < 20 || ipv4_len > 60 { return 0; }
+
+    // 3. Read TCP Data Offset
+    let tcp_start = start + 14 + ipv4_len;
+    if tcp_start + 13 > end { return 0; }
+    let doff = (unsafe { *((tcp_start + 12) as *const u8) } >> 4) * 4;
+    let tcp_len = doff as usize;
+    
+    // eBPF Verifier help: Bound the length
+    if tcp_len < 20 || tcp_len > 60 { return 0; }
+
+    // 4. Calculate TLS Payload Offset
+    let tls_offset = 14 + ipv4_len + tcp_len;
+    
+    // 5. Check if it's a TLS Handshake (0x16)
+    if start + tls_offset + 1 > end { return 0; }
+    if unsafe { *((start + tls_offset) as *const u8) } == 0x16 {
+        // Check for SNI at the dynamic offset
+        let sni_start = tls_offset + 43;
+        
+        // Unrolled bounds-checked scanning
+        if check_sni_at(start, end, sni_start, res) == 1 { return 1; }
+        if check_sni_at(start, end, sni_start + 32, res) == 1 { return 1; }
+        if check_sni_at(start, end, sni_start + 64, res) == 1 { return 1; }
+        if check_sni_at(start, end, sni_start + 96, res) == 1 { return 1; }
     }
 
     0

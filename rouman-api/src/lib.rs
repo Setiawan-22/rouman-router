@@ -1,4 +1,5 @@
 use std::sync::Arc;
+extern crate axum_server;
 use axum::{routing::{get, post}, Router, Json, extract::{State, FromRef}};
 use tower_http::services::{ServeDir, ServeFile};
 use tokio::time::{timeout, Duration};
@@ -17,6 +18,7 @@ pub mod automation;
 pub mod database;
 pub mod compute;
 pub mod error;
+pub mod os_detect;
 #[derive(Clone)]
 pub struct AppState {
     pub config_engine: Arc<config::ConfigEngine>,
@@ -73,7 +75,7 @@ pub async fn start_api_server(
         .not_found_service(ServeFile::new("ui/build/index.html"));
 
     let config_engine = config::ConfigEngine::new().await;
-    let db = Arc::new(database::Database::new("sqlite:/opt/rouman/radius.db").await.expect("Failed to open database"));
+    let db = Arc::new(database::Database::new("sqlite:/var/lib/rouman/radius.db").await.expect("Failed to open database"));
     let dns_state = Arc::new(dns::DnsState::default());
     let lease_pool = network::dhcp::SharedLeasePool::default();
     let firewall_state = Arc::new(firewall::FirewallState { ebpf: bpf });
@@ -136,9 +138,34 @@ pub async fn start_api_server(
         .with_state(state)
         .fallback_service(serve_dir);
 
+    // HTTP Server for Web UI
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8000").await.unwrap();
+    let app_http = app.clone();
     tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
+        axum::serve(listener, app_http).await.unwrap();
+    });
+
+    // HTTPS Server for Secure Agent Communication
+    let cert_dir = "/etc/rouman/certs";
+    std::fs::create_dir_all(cert_dir).unwrap_or_default();
+    let cert_path = format!("{}/cert.pem", cert_dir);
+    let key_path = format!("{}/key.pem", cert_dir);
+
+    if !std::path::Path::new(&cert_path).exists() {
+        println!("Generating self-signed TLS certificates for Compute Agents...");
+        let subject_alt_names = vec!["localhost".to_string(), "127.0.0.1".to_string(), "rouman-core".to_string()];
+        let cert = rcgen::generate_simple_self_signed(subject_alt_names).expect("Failed to generate TLS cert");
+        std::fs::write(&cert_path, cert.cert.pem()).unwrap();
+        std::fs::write(&key_path, cert.signing_key.serialize_pem()).unwrap();
+    }
+
+    let app_https = app;
+    tokio::spawn(async move {
+        let tls_config = axum_server::tls_rustls::RustlsConfig::from_pem_file(cert_path, key_path).await.unwrap();
+        axum_server::bind_rustls("0.0.0.0:8443".parse::<std::net::SocketAddr>().unwrap(), tls_config)
+            .serve(app_https.into_make_service())
+            .await
+            .unwrap();
     });
 
     (dns_state_for_daemon, lease_pool_for_daemon, config_for_daemon)
@@ -224,7 +251,10 @@ async fn telemetry(State(_): State<AppState>) -> Json<serde_json::Value> {
         *sys_guard = Some(sys);
     }
     
-    let sys = sys_guard.as_mut().unwrap();
+    let sys = match sys_guard.as_mut() {
+        Some(s) => s,
+        None => return Json(serde_json::json!({ "error": "System info not available" })),
+    };
     sys.refresh_cpu_usage();
     sys.refresh_memory();
     
@@ -264,10 +294,16 @@ async fn interfaces_handler(State(_): State<AppState>) -> Json<serde_json::Value
 }
 
 async fn system_update_check(State(_): State<AppState>) -> Json<serde_json::Value> {
-    // Jalankan apt update secara asinkron
+    let os = crate::os_detect::detect_os();
+    let command = match os {
+        crate::os_detect::OsFamily::Fedora => "dnf check-update",
+        crate::os_detect::OsFamily::Alpine => "apk update",
+        _ => "apt-get update && apt-get --just-print upgrade", // Default to Debian/Ubuntu
+    };
+
     let output = tokio::process::Command::new("sh")
         .arg("-c")
-        .arg("apt-get update && apt-get --just-print upgrade")
+        .arg(command)
         .output()
         .await;
 
@@ -277,6 +313,7 @@ async fn system_update_check(State(_): State<AppState>) -> Json<serde_json::Valu
             let stderr = String::from_utf8_lossy(&out.stderr).to_string();
             Json(serde_json::json!({
                 "status": "success",
+                "os_detected": os.to_string(),
                 "stdout": stdout,
                 "stderr": stderr
             }))
@@ -286,23 +323,17 @@ async fn system_update_check(State(_): State<AppState>) -> Json<serde_json::Valu
 }
 
 async fn system_update_upgrade(State(_): State<AppState>) -> Json<serde_json::Value> {
-    // Jalankan upgrade (tanpa konfirmasi interaktif)
-    let output = tokio::process::Command::new("sh")
-        .arg("-c")
-        .arg("DEBIAN_FRONTEND=noninteractive apt-get upgrade -y")
-        .output()
-        .await;
+    // SECURITY FIX: Disabling direct package upgrade via API for production safety.
+    // It is highly recommended to perform system upgrades via SSH to monitor progress and handle prompts.
+    let os = crate::os_detect::detect_os();
+    let cmd_suggestion = match os {
+        crate::os_detect::OsFamily::Fedora => "dnf upgrade",
+        crate::os_detect::OsFamily::Alpine => "apk upgrade",
+        _ => "apt-get upgrade",
+    };
 
-    match output {
-        Ok(out) => {
-            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-            Json(serde_json::json!({
-                "status": "success",
-                "stdout": stdout,
-                "stderr": stderr
-            }))
-        }
-        Err(e) => Json(serde_json::json!({ "status": "error", "message": format!("{}", e) })),
-    }
+    Json(serde_json::json!({
+        "status": "error",
+        "message": format!("Direct system upgrade via Web UI is disabled for security reasons. Please use SSH to perform '{}' on your {} system.", cmd_suggestion, os.to_string())
+    }))
 }

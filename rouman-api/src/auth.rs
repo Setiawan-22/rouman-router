@@ -1,11 +1,12 @@
 use axum::{
-    extract::Request,
+    extract::{Request, State},
     http::{header, StatusCode},
     middleware::Next,
     response::Response,
     routing::{get, post},
     Json, Router,
 };
+use sqlx::Row;
 use axum_extra::extract::cookie::{Cookie, CookieJar};
 use jsonwebtoken::{encode, decode, Header, EncodingKey, DecodingKey, Validation};
 use serde::{Deserialize, Serialize};
@@ -49,41 +50,62 @@ pub fn auth_routes() -> Router<crate::AppState> {
         .route("/me", get(me_handler).route_layer(axum::middleware::from_fn(auth_middleware)))
 }
 
-async fn login_handler(jar: CookieJar, Json(payload): Json<AuthPayload>) -> AppResult<(CookieJar, Json<AuthResponse>)> {
-    // Hardcoded Dummy Authenticate
-    if payload.username == "admin" && payload.password == "admin" {
-        let expiration = chrono::Utc::now()
-            .checked_add_signed(chrono::Duration::hours(24))
-            .expect("valid timestamp")
-            .timestamp() as usize;
+async fn login_handler(
+    State(state): State<crate::AppState>,
+    jar: CookieJar, 
+    Json(payload): Json<AuthPayload>
+) -> AppResult<(CookieJar, Json<AuthResponse>)> {
+    // Query database for user
+    let user = sqlx::query("SELECT password_hash, salt FROM system_admins WHERE username = ?")
+        .bind(&payload.username)
+        .fetch_optional(&state.db.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Database error: {}", e)))?;
 
-        let claims = Claims {
-            sub: payload.username.to_owned(),
-            exp: expiration,
-        };
+    if let Some(row) = user {
+        let stored_hash: String = row.get("password_hash");
+        let salt: String = row.get("salt");
 
-        // Create token
-        let token = encode(
-            &Header::default(),
-            &claims,
-            &EncodingKey::from_secret(&get_jwt_secret()),
-        ).map_err(|e| AppError::Internal(format!("Token creation failed: {}", e)))?;
+        // Verify password
+        let mut hasher = sha2::Sha256::new();
+        sha2::Digest::update(&mut hasher, payload.password.as_bytes());
+        sha2::Digest::update(&mut hasher, salt.as_bytes());
+        let calculated_hash = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect::<String>();
 
-        // Set HttpOnly Cookie
-        let cookie = Cookie::build(("auth_token", token))
-            .path("/")
-            .http_only(true)
-            .secure(false) // Set to true if using HTTPS
-            .same_site(axum_extra::extract::cookie::SameSite::Lax)
-            .build();
+        if calculated_hash == stored_hash {
+            let expiration = chrono::Utc::now()
+                .checked_add_signed(chrono::Duration::hours(24))
+                .expect("valid timestamp")
+                .timestamp() as usize;
 
-        Ok((
-            jar.add(cookie),
-            Json(AuthResponse { message: "Login successful".to_owned() }),
-        ))
-    } else {
-        Err(AppError::Unauthorized("Invalid username or password".to_owned()))
+            let claims = Claims {
+                sub: payload.username.to_owned(),
+                exp: expiration,
+            };
+
+            // Create token
+            let token = encode(
+                &Header::default(),
+                &claims,
+                &EncodingKey::from_secret(&get_jwt_secret()),
+            ).map_err(|e| AppError::Internal(format!("Token creation failed: {}", e)))?;
+
+            // Set HttpOnly Cookie
+            let cookie = Cookie::build(("auth_token", token))
+                .path("/")
+                .http_only(true)
+                .secure(false) // Set to true if using HTTPS
+                .same_site(axum_extra::extract::cookie::SameSite::Lax)
+                .build();
+
+            return Ok((
+                jar.add(cookie),
+                Json(AuthResponse { message: "Login successful".to_owned() }),
+            ));
+        }
     }
+
+    Err(AppError::Unauthorized("Invalid username or password".to_owned()))
 }
 
 async fn logout_handler(jar: CookieJar) -> (CookieJar, Json<AuthResponse>) {

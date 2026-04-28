@@ -121,7 +121,11 @@ async fn handle_login(
 
             // 4. Fallback ke NFTables untuk paket yang tidak kena XDP
             let nft_cmd = format!("add element ip rouman_nat authorized_macs {{ {} }}", mac_str);
-            let _ = Command::new("nft").args(nft_cmd.split_whitespace()).output();
+            match Command::new("nft").args(nft_cmd.split_whitespace()).output() {
+                Ok(out) if !out.status.success() => log::error!("Failed to authorize MAC in nftables: {}", String::from_utf8_lossy(&out.stderr)),
+                Err(e) => log::error!("Failed to execute nft: {}", e),
+                _ => {}
+            }
             
             return Html("<h1>Success! You are now connected.</h1><p>Please wait while we redirect you...</p>");
         } else {

@@ -29,7 +29,7 @@ pub async fn apply_wireguard_settings(config: &WireguardConfig) -> Result<(), St
         let interface_name: InterfaceName = iface.name.parse().map_err(|e| format!("Invalid interface name {}: {}", iface.name, e))?;
 
         if !iface.enabled {
-            let _ = Command::new("ip").args(["link", "delete", &iface.name]).output();
+            let _ = crate::config::mutator::run_net_cmd("ip", &["link", "delete", &iface.name], false);
             continue;
         }
 
@@ -37,13 +37,13 @@ pub async fn apply_wireguard_settings(config: &WireguardConfig) -> Result<(), St
         let check = Command::new("ip").args(["link", "show", &iface.name]).output();
         if let Ok(out) = check {
             if !out.status.success() {
-                let _ = Command::new("ip").args(["link", "add", "dev", &iface.name, "type", "wireguard"]).output();
+                crate::config::mutator::run_net_cmd("ip", &["link", "add", "dev", &iface.name, "type", "wireguard"], true)?;
             }
         }
 
         // 2. Set IP Address
-        let _ = Command::new("ip").args(["addr", "flush", "dev", &iface.name]).output();
-        let _ = Command::new("ip").args(["addr", "add", &iface.address, "dev", &iface.name]).output();
+        let _ = crate::config::mutator::run_net_cmd("ip", &["addr", "flush", "dev", &iface.name], false);
+        crate::config::mutator::run_net_cmd("ip", &["addr", "add", &iface.address, "dev", &iface.name], true)?;
 
         // 3. Configure WG via wireguard-control
         let priv_key = Key::from_base64(&iface.private_key).map_err(|e| format!("Invalid Private Key: {}", e))?;
@@ -77,7 +77,7 @@ pub async fn apply_wireguard_settings(config: &WireguardConfig) -> Result<(), St
             .map_err(|e| format!("Failed to apply WG config to {}: {}", iface.name, e))?;
 
         // 4. Bring UP
-        let _ = Command::new("ip").args(["link", "set", "up", "dev", &iface.name]).output();
+        crate::config::mutator::run_net_cmd("ip", &["link", "set", "up", "dev", &iface.name], true)?;
     }
     
     Ok(())

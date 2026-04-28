@@ -46,10 +46,10 @@ impl PppoeManager {
             // Start pppd if not running
             if !self.is_pppd_running().await {
                 println!("Starting PPPoE connection for {} on {}...", username, interface);
-                let _ = Command::new("pppd")
-                    .arg("call")
-                    .arg("rouman")
-                    .spawn();
+                match Command::new("pppd").arg("call").arg("rouman").spawn() {
+                    Ok(_) => log::info!("PPPoE process (pppd) spawned successfully."),
+                    Err(e) => log::error!("Failed to spawn pppd: {}", e),
+                }
             }
 
             // Monitor status
@@ -97,7 +97,11 @@ impl PppoeManager {
     async fn stop_pppd(&self) {
         if self.is_pppd_running().await {
             println!("Stopping PPPoE connection...");
-            let _ = Command::new("poff").arg("rouman").output().await;
+            match Command::new("poff").arg("rouman").output().await {
+                Ok(out) if !out.status.success() => log::error!("poff failed: {}", String::from_utf8_lossy(&out.stderr)),
+                Err(e) => log::error!("Failed to execute poff: {}", e),
+                _ => log::info!("PPPoE connection stopped."),
+            }
             
             let mut status = self.status.write().await;
             status.connected = false;

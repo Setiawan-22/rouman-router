@@ -1,6 +1,23 @@
 use super::RoumanConfig;
 use std::process::Command;
 
+
+pub fn run_net_cmd(cmd: &str, args: &[&str], critical: bool) -> Result<(), String> {
+    let output = std::process::Command::new(cmd).args(args).output().map_err(|e| format!("Failed to execute '{}': {}", cmd, e))?;
+    
+    if !output.status.success() {
+        let err_msg = String::from_utf8_lossy(&output.stderr);
+        let msg = format!("Command '{} {:?}' failed: {}", cmd, args, err_msg.trim());
+        
+        if critical {
+            return Err(msg);
+        } else {
+            eprintln!("Non-critical network error: {}", msg);
+        }
+    }
+    Ok(())
+}
+
 pub async fn apply_config(new_config: &RoumanConfig) -> Result<(), String> {
     // 0. Manajemen Interface (VLAN & Bridge)
     let iface_cfg = &new_config.network.interfaces;
@@ -9,12 +26,12 @@ pub async fn apply_config(new_config: &RoumanConfig) -> Result<(), String> {
     for br in &iface_cfg.bridges {
         if br.enabled {
             // Cek jika sudah ada
-            let _ = Command::new("ip").args(["link", "add", "name", &br.name, "type", "bridge"]).output();
-            let _ = Command::new("ip").args(["link", "set", &br.name, "up"]).output();
+            run_net_cmd("ip", &["link", "add", "name", &br.name, "type", "bridge"], false)?;
+            run_net_cmd("ip", &["link", "set", &br.name, "up"], false)?;
 
             for port in &br.members {
-                let _ = Command::new("ip").args(["link", "set", port, "master", &br.name]).output();
-                let _ = Command::new("ip").args(["link", "set", port, "up"]).output();
+                run_net_cmd("ip", &["link", "set", port, "master", &br.name], false)?;
+                run_net_cmd("ip", &["link", "set", port, "up"], false)?;
             }
         }
     }
@@ -25,7 +42,7 @@ pub async fn apply_config(new_config: &RoumanConfig) -> Result<(), String> {
             let _ = Command::new("ip").args([
                 "link", "add", "link", &vlan.parent, "name", &vlan.name, "type", "vlan", "id", &vlan.vlan_id.to_string()
             ]).output();
-            let _ = Command::new("ip").args(["link", "set", &vlan.name, "up"]).output();
+            run_net_cmd("ip", &["link", "set", &vlan.name, "up"], false)?;
         }
     }
 
@@ -34,10 +51,10 @@ pub async fn apply_config(new_config: &RoumanConfig) -> Result<(), String> {
         if assign.enabled {
             // Flush IP lama agar bersih (hati-hati untuk eth0/WAN)
             if assign.interface != "eth0" && !assign.interface.contains("ppp") {
-                 let _ = Command::new("ip").args(["addr", "flush", "dev", &assign.interface]).output();
+                 run_net_cmd("ip", &["addr", "flush", "dev", &assign.interface], false)?;
             }
-            let _ = Command::new("ip").args(["addr", "add", &assign.address, "dev", &assign.interface]).output();
-            let _ = Command::new("ip").args(["link", "set", &assign.interface, "up"]).output();
+            run_net_cmd("ip", &["addr", "add", &assign.address, "dev", &assign.interface], false)?;
+            run_net_cmd("ip", &["link", "set", &assign.interface, "up"], false)?;
         }
     }
 
@@ -53,11 +70,11 @@ pub async fn apply_config(new_config: &RoumanConfig) -> Result<(), String> {
     match output {
         Ok(out) => {
             if !out.status.success() {
-                let _ = Command::new("hostname").arg(hostname).output();
+                run_net_cmd("hostname", &[hostname], false)?;
             }
         },
         Err(_) => {
-             let _ = Command::new("hostname").arg(hostname).output();
+             run_net_cmd("hostname", &[hostname], false)?;
         }
     }
     
@@ -67,27 +84,27 @@ pub async fn apply_config(new_config: &RoumanConfig) -> Result<(), String> {
     // Surgical Reset: Hapus hanya rule Multi-WAN lama (Priority 100-200)
     // agar tidak memutus koneksi sistem global (ip rule flush is too dangerous)
     for priority in 100..=200 {
-        let _ = Command::new("ip").args(["rule", "del", "priority", &priority.to_string()]).output();
+        run_net_cmd("ip", &["rule", "del", "priority", &priority.to_string()], false)?;
     }
 
     if net.enable_nat {
         // Aktifkan IP Forwarding
-        let _ = Command::new("sysctl").arg("-w").arg("net.ipv4.ip_forward=1").output();
+        run_net_cmd("sysctl", &["-w", "net.ipv4.ip_forward=1"], false)?;
 
         // Flush NFTables
-        let _ = Command::new("nft").args(["delete", "table", "ip", "rouman_nat"]).output();
-        let _ = Command::new("nft").args(["delete", "table", "ip", "rouman_mangle"]).output();
+        run_net_cmd("nft", &["delete", "table", "ip", "rouman_nat"], false)?;
+        run_net_cmd("nft", &["delete", "table", "ip", "rouman_mangle"], false)?;
 
         // Buat Kerangka Dasar NAT & Mangle
-        let _ = Command::new("nft").args(["add", "table", "ip", "rouman_nat"]).output();
-        let _ = Command::new("nft").args(["add", "table", "ip", "rouman_mangle"]).output();
+        run_net_cmd("nft", &["add", "table", "ip", "rouman_nat"], false)?;
+        run_net_cmd("nft", &["add", "table", "ip", "rouman_mangle"], false)?;
         
-        let _ = Command::new("nft").args(["add", "chain", "ip", "rouman_nat", "postrouting", "{ type nat hook postrouting priority 100 ; }"]).output();
-        let _ = Command::new("nft").args(["add", "chain", "ip", "rouman_nat", "prerouting", "{ type nat hook prerouting priority -100 ; }"]).output();
-        let _ = Command::new("nft").args(["add", "chain", "ip", "rouman_mangle", "prerouting", "{ type filter hook prerouting priority -150 ; }"]).output();
+        run_net_cmd("nft", &["add", "chain", "ip", "rouman_nat", "postrouting", "{ type nat hook postrouting priority 100 ; }"], false)?;
+        run_net_cmd("nft", &["add", "chain", "ip", "rouman_nat", "prerouting", "{ type nat hook prerouting priority -100 ; }"], false)?;
+        run_net_cmd("nft", &["add", "chain", "ip", "rouman_mangle", "prerouting", "{ type filter hook prerouting priority -150 ; }"], false)?;
 
         // MSS Clamping
-        let _ = Command::new("nft").args(["add", "rule", "ip", "rouman_nat", "postrouting", "tcp", "flags", "syn", "tcp", "option", "maxseg", "size", "set", "rt", "mtu"]).output();
+        run_net_cmd("nft", &["add", "rule", "ip", "rouman_nat", "postrouting", "tcp", "flags", "syn", "tcp", "option", "maxseg", "size", "set", "rt", "mtu"], false)?;
 
         // 2.1 Multi-WAN Configuration
         let active_wans: Vec<_> = net.wans.iter().filter(|w| w.enabled).collect();
@@ -99,11 +116,11 @@ pub async fn apply_config(new_config: &RoumanConfig) -> Result<(), String> {
             let iface = if wan.pppoe_enabled { "ppp0" } else { &wan.interface };
 
             // A. Setup Routing Table per WAN
-            let _ = Command::new("ip").args(["route", "flush", "table", &table_id.to_string()]).output();
-            let _ = Command::new("ip").args(["route", "add", "default", "via", &wan.gateway, "dev", iface, "table", &table_id.to_string()]).output();
+            run_net_cmd("ip", &["route", "flush", "table", &table_id.to_string()], false)?;
+            run_net_cmd("ip", &["route", "add", "default", "via", &wan.gateway, "dev", iface, "table", &table_id.to_string()], false)?;
             
             // B. IP Rule for Marking (with explicit priority for surgical cleanup)
-            let _ = Command::new("ip").args(["rule", "add", "fwmark", &mark_id.to_string(), "table", &table_id.to_string(), "priority", &mark_id.to_string()]).output();
+            run_net_cmd("ip", &["rule", "add", "fwmark", &mark_id.to_string(), "table", &table_id.to_string(), "priority", &mark_id.to_string()], false)?;
 
             // C. PCC Logic (jhash)
             if net.lb_mode == super::LoadBalancingMode::Pcc && total_weight > 0 {
@@ -114,12 +131,14 @@ pub async fn apply_config(new_config: &RoumanConfig) -> Result<(), String> {
                 );
                 // Note: Implementasi PCC yang lebih presisi membutuhkan penanganan per-weight. 
                 // Untuk versi ini kita gunakan distribusi merata.
-                let _ = Command::new("nft").args(pcc_rule.split_whitespace()).output();
+                let args: Vec<&str> = pcc_rule.split_whitespace().collect();
+                run_net_cmd("nft", &args, false)?;
             }
 
             // D. Masquerade untuk WAN ini
             let masquerade_rule = format!("add rule ip rouman_nat postrouting oifname \"{}\" masquerade", iface);
-            let _ = Command::new("nft").args(masquerade_rule.split_whitespace()).output();
+            let args: Vec<&str> = masquerade_rule.split_whitespace().collect();
+            run_net_cmd("nft", &args, false)?;
 
             // E. Port Forwarding untuk WAN ini
             for pf in &net.port_forwards {
@@ -127,7 +146,8 @@ pub async fn apply_config(new_config: &RoumanConfig) -> Result<(), String> {
                     "add rule ip rouman_nat prerouting iifname \"{}\" {} dport {} dnat to {}:{}",
                     iface, pf.proto, pf.ext_port, pf.int_ip, pf.int_port
                 );
-                let _ = Command::new("nft").args(pf_rule.split_whitespace()).output();
+                let args: Vec<&str> = pf_rule.split_whitespace().collect();
+                run_net_cmd("nft", &args, false)?;
             }
         }
 
@@ -135,36 +155,42 @@ pub async fn apply_config(new_config: &RoumanConfig) -> Result<(), String> {
         if new_config.dns.transparent_intercept {
             let dns_redirect_udp = "add rule ip rouman_nat prerouting udp dport 53 redirect to :53";
             let dns_redirect_tcp = "add rule ip rouman_nat prerouting tcp dport 53 redirect to :53";
-            let _ = Command::new("nft").args(dns_redirect_udp.split_whitespace()).output();
-            let _ = Command::new("nft").args(dns_redirect_tcp.split_whitespace()).output();
+            
+            let args_udp: Vec<&str> = dns_redirect_udp.split_whitespace().collect();
+            run_net_cmd("nft", &args_udp, false)?;
+            
+            let args_tcp: Vec<&str> = dns_redirect_tcp.split_whitespace().collect();
+            run_net_cmd("nft", &args_tcp, false)?;
         }
 
         // 2.3 Failover Mode (Main Route Table)
         if net.lb_mode == super::LoadBalancingMode::Failover || net.lb_mode == super::LoadBalancingMode::None {
-            let _ = Command::new("ip").args(["route", "flush", "table", "main", "type", "unicast", "scope", "global"]).output();
+            run_net_cmd("ip", &["route", "flush", "table", "main", "type", "unicast", "scope", "global"], false)?;
             for wan in &active_wans {
                 let iface = if wan.pppoe_enabled { "ppp0" } else { &wan.interface };
                 let metric = wan.distance * 10;
-                let _ = Command::new("ip").args([
-                    "route", "add", "default", "via", &wan.gateway, "dev", iface, "metric", &metric.to_string()
-                ]).output();
+                let metric_str = metric.to_string();
+                run_net_cmd("ip", &[
+                    "route", "add", "default", "via", &wan.gateway, "dev", iface, "metric", &metric_str
+                ], false)?;
             }
         }
 
         // 2.4 Hotspot & Captive Portal Redirection
         // Buat set untuk MAC yang sudah terautentikasi
-        let _ = Command::new("nft").args(["add", "set", "ip", "rouman_nat", "authorized_macs", "{ type ether_addr ; }"]).output();
+        run_net_cmd("nft", &["add", "set", "ip", "rouman_nat", "authorized_macs", "{ type ether_addr ; }"], false)?;
         
         // Redirect port 80 ke 8080 (Hotspot Landing Page) untuk yang belum login
         // Note: Kita bypass traffic DNS (53) agar deteksi captive portal OS lancar
         let hotspot_redirect = "add rule ip rouman_nat prerouting tcp dport 80 ether saddr != @authorized_macs redirect to :8080";
-        let _ = Command::new("nft").args(hotspot_redirect.split_whitespace()).output();
+        let args: Vec<&str> = hotspot_redirect.split_whitespace().collect();
+        run_net_cmd("nft", &args, false)?;
 
     } else {
         // Matikan Forwarding
-        let _ = Command::new("sysctl").arg("-w").arg("net.ipv4.ip_forward=0").output();
-        let _ = Command::new("nft").args(["delete", "table", "ip", "rouman_nat"]).output();
-        let _ = Command::new("nft").args(["delete", "table", "ip", "rouman_mangle"]).output();
+        run_net_cmd("sysctl", &["-w", "net.ipv4.ip_forward=0"], false)?;
+        run_net_cmd("nft", &["delete", "table", "ip", "rouman_nat"], false)?;
+        run_net_cmd("nft", &["delete", "table", "ip", "rouman_mangle"], false)?;
     }
 
     // 3. Traffic Shaping (QoS) - CAKE
@@ -174,14 +200,14 @@ pub async fn apply_config(new_config: &RoumanConfig) -> Result<(), String> {
         let iface = if wan.pppoe_enabled { "ppp0" } else { &wan.interface };
 
         // Hapus qdisc lama jika ada
-        let _ = Command::new("tc").args(["qdisc", "del", "dev", iface, "root"]).output();
+        run_net_cmd("tc", &["qdisc", "del", "dev", iface, "root"], false)?;
         
         if qos.upload_mbps > 0 {
             // Gunakan parameter upload_mbps untuk pembatasan egress (keluar kearah internet) di interface WAN
             let bandwidth = format!("{}mbit", qos.upload_mbps);
-            let _ = Command::new("tc").args([
+            run_net_cmd("tc", &[
                 "qdisc", "add", "dev", iface, "root", "cake", "bandwidth", &bandwidth
-            ]).output();
+            ], false)?;
         }
     }
 
@@ -191,13 +217,13 @@ pub async fn apply_config(new_config: &RoumanConfig) -> Result<(), String> {
         let iface = &assign.interface;
 
         // Reset TC pada interface lokal
-        let _ = Command::new("tc").args(["qdisc", "del", "dev", iface, "root"]).output();
-        let _ = Command::new("tc").args(["qdisc", "del", "dev", iface, "ingress"]).output();
+        run_net_cmd("tc", &["qdisc", "del", "dev", iface, "root"], false)?;
+        run_net_cmd("tc", &["qdisc", "del", "dev", iface, "ingress"], false)?;
 
         if !new_config.network.simple_queues.is_empty() {
              // 6.1 Setup Root HTB untuk Download (Egress LAN)
-             let _ = Command::new("tc").args(["qdisc", "add", "dev", iface, "root", "handle", "1:", "htb", "default", "1"]).output();
-             let _ = Command::new("tc").args(["qdisc", "add", "dev", iface, "ingress"]).output();
+             run_net_cmd("tc", &["qdisc", "add", "dev", iface, "root", "handle", "1:", "htb", "default", "1"], false)?;
+             run_net_cmd("tc", &["qdisc", "add", "dev", iface, "ingress"], false)?;
 
              for (idx, q) in new_config.network.simple_queues.iter().enumerate() {
                  if !q.enabled { continue; }
@@ -205,23 +231,24 @@ pub async fn apply_config(new_config: &RoumanConfig) -> Result<(), String> {
                  
                  // Limit Download (Egress kearah klien)
                  let down_rate = format!("{}mbit", q.download_mbps);
-                 let _ = Command::new("tc").args([
-                     "class", "add", "dev", iface, "parent", "1:", "classid", &format!("1:{}", class_id), 
+                 let class_id_str = format!("1:{}", class_id);
+                 run_net_cmd("tc", &[
+                     "class", "add", "dev", iface, "parent", "1:", "classid", &class_id_str, 
                      "htb", "rate", &down_rate, "ceil", &down_rate
-                 ]).output();
+                 ], false)?;
 
-                 let _ = Command::new("tc").args([
+                 run_net_cmd("tc", &[
                      "filter", "add", "dev", iface, "protocol", "ip", "parent", "1:0", "prio", "1", 
-                     "u32", "match", "ip", "dst", &q.target, "flowid", &format!("1:{}", class_id)
-                 ]).output();
+                     "u32", "match", "ip", "dst", &q.target, "flowid", &class_id_str
+                 ], false)?;
 
                  // Limit Upload (Ingress dari klien) - Menggunakan Policier sederhana
                  let up_rate = format!("{}mbit", q.upload_mbps);
                  let burst = format!("{}kbit", q.upload_mbps * 128); // Sederhana
-                 let _ = Command::new("tc").args([
+                 run_net_cmd("tc", &[
                      "filter", "add", "dev", iface, "parent", "ffff:", "protocol", "ip", "prio", "1", 
                      "u32", "match", "ip", "src", &q.target, "police", "rate", &up_rate, "burst", &burst, "drop"
-                 ]).output();
+                 ], false)?;
              }
         }
     }

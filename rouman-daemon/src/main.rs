@@ -98,13 +98,49 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // Jalankan Basis Data RADIUS
-    let db = match database::Database::new("sqlite://radius.db").await {
+    let db = match database::Database::new("sqlite:/var/lib/rouman/radius.db").await {
         Ok(d) => Arc::new(d),
         Err(e) => {
             log::error!("Failed to initialize database: {}", e);
             return Err(e.into());
         }
     };
+
+    // Load persisted DHCP leases into memory
+    let db_for_load = db.clone();
+    let lease_pool_for_load = lease_pool.clone();
+    tokio::spawn(async move {
+        match db_for_load.get_active_dhcp_leases().await {
+            Ok(leases) => {
+                let mut pool = lease_pool_for_load.leases.lock().await;
+                for (mac_str, ip_str, hostname, expires_at) in leases {
+                    // Parse MAC
+                    let mut mac = [0u8; 6];
+                    let parts: Vec<&str> = mac_str.split(':').collect();
+                    if parts.len() == 6 {
+                        for (i, p) in parts.iter().enumerate() {
+                            if let Ok(b) = u8::from_str_radix(p, 16) {
+                                mac[i] = b;
+                            }
+                        }
+                    }
+                    
+                    // Parse IP
+                    if let Ok(ip) = ip_str.parse::<std::net::Ipv4Addr>() {
+                        let expires = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(expires_at as u64);
+                        pool.insert(mac, rouman_api::network::dhcp::DhcpLease {
+                            mac,
+                            ip,
+                            hostname,
+                            expires,
+                        });
+                    }
+                }
+                log::info!("Loaded {} DHCP leases from database.", pool.len());
+            },
+            Err(e) => log::error!("Failed to load DHCP leases from DB: {}", e),
+        }
+    });
 
     // Jalankan WAN Manager (Supervised)
     let wan_manager = wan_manager::WanManager::new();
@@ -181,7 +217,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Jalankan Edge Compute Manager (Firecracker & Containerd Isolation Network)
-    let _compute_manager = compute::ComputeManager::new();
+    let bridge_subnet = config_engine.active.read().await.compute.bridge_subnet.clone();
+    let _compute_manager = compute::ComputeManager::new(bridge_subnet);
 
     // Jalankan PPPoE Manager
     if pppoe_enabled {
@@ -206,10 +243,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Jalankan DHCP Server (Supervised)
     let lease_pool_clone = lease_pool.clone();
     let config_arc_dhcp = config_engine.get_active_config_arc();
+    let db_for_dhcp = db.clone();
     tokio::spawn(async move {
         loop {
             log::info!("Starting DHCP Server supervisor...");
-            if let Err(e) = dhcp_server::run_dhcp_server(config_arc_dhcp.clone(), lease_pool_clone.clone()).await {
+            if let Err(e) = dhcp_server::run_dhcp_server(
+                config_arc_dhcp.clone(), 
+                lease_pool_clone.clone(),
+                db_for_dhcp.clone(),
+            ).await {
                 log::error!("DHCP Server error: {}. Restarting in 5s...", e);
             }
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;

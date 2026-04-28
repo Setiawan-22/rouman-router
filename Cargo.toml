@@ -4,7 +4,7 @@ members = [
     "rouman-cli",
     "rouman-api",
     "rouman-common",
-    "rouman-ebpf",
+    "rouman-ebpf", "rouman-agent",
 ]
 resolver = "2"
 

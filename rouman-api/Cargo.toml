@@ -31,3 +31,5 @@ sqlx = { version = "0.8.6", features = ["sqlite", "runtime-tokio-rustls", "macro
 time = "0.3.37"
 lazy_static = "1.5.0"
 anyhow = "1.0.102"
+rcgen = "0.14.7"
+axum-server = { version = "0.8.0", features = ["tls-rustls"] }
